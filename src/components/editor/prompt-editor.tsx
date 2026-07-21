@@ -21,7 +21,13 @@ import {
   lineNumbers,
 } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
-import { Lock, Trash2 } from "lucide-react"
+import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  BookmarkPlus,
+  Lock,
+  Trash2,
+} from "lucide-react"
 
 import {
   addRegionEffect,
@@ -31,13 +37,27 @@ import {
   regionExtensions,
   regionInfos,
   regionsField,
+  registerView,
+  regionsOverlap,
   removeRegionEffect,
   ribbonSegments,
   scrollToRegion,
+  unregisterView,
   updateRegionEffect,
 } from "@/lib/editor"
 import type { Flag, Region, RegionInfo, RibbonSegment } from "@/lib/editor"
-import { getDoc, updateDocContent } from "@/lib/library"
+import {
+  createSnippetFromText,
+  getDoc,
+  getSnippet,
+  getSnippetBody,
+  promoteSnippet,
+  reportError,
+  updateDocContent,
+  updateSnippetFromRegion,
+  useLibrary,
+} from "@/lib/library"
+import type { Snippet } from "@/lib/library"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -60,6 +80,9 @@ interface Chrome {
   regions: RegionInfo[]
   totalTokens: number
   activeRegionId: string | null
+  /** Current text of the active region — lets the Inspector detect local edits
+   *  (region text ≠ snippet canonical) without reading the view ref in render. */
+  activeRegionText: string
   line: number
   col: number
   segments: RibbonSegment[]
@@ -86,10 +109,14 @@ function readChrome(view: EditorView, host: HTMLElement): Chrome {
 
   const sd = view.scrollDOM
   const scrollHeight = sd.scrollHeight || 1
+  const active = regionAt(state, sel.head)
   return {
     regions: regionInfos(state),
     totalTokens: approxTokens(state.doc.toString()),
-    activeRegionId: regionAt(state, sel.head)?.id ?? null,
+    activeRegionId: active?.id ?? null,
+    activeRegionText: active
+      ? state.doc.sliceString(active.from, active.to)
+      : "",
     line: line.number,
     col: sel.head - line.from + 1,
     segments: ribbonSegments(state),
@@ -197,6 +224,7 @@ export function PromptEditor({ docId }: { docId: string }) {
       }),
     })
     viewRef.current = view
+    registerView(docId, view)
     let ribbonFade = 0
     const onScroll = () => {
       schedule(view)
@@ -212,6 +240,7 @@ export function PromptEditor({ docId }: { docId: string }) {
     return () => {
       cancelAnimationFrame(raf)
       window.clearTimeout(ribbonFade)
+      unregisterView(docId, view)
       viewRef.current = null
       view.destroy()
     }
@@ -261,14 +290,22 @@ export function PromptEditor({ docId }: { docId: string }) {
     view.focus()
   }, [])
 
-  const markSelection = useCallback(() => {
+  // Mark a span as a region. Region-first, link-on-resolve: the region is painted
+  // synchronously (so it maps through any edits during the await), then — inside a
+  // prompt — a snippet is created and its id attached. Marking inside a snippet
+  // stays a plain local region (flat v1). Failure leaves it unlinked.
+  const markSelection = useCallback(async () => {
     const view = viewRef.current
     if (!view) return
     const { from, to } = view.state.selection.main
     if (from === to) return
+    // Overlapping regions make "which snippet owns this text" ambiguous.
+    if (regionsOverlap(view.state.field(regionsField), from, to)) return
+    const id = `r${Date.now().toString(36)}`
+    const text = view.state.doc.sliceString(from, to)
     view.dispatch({
       effects: addRegionEffect.of({
-        id: `r${Date.now().toString(36)}`,
+        id,
         name: "new-region",
         flag: "ok",
         note: "",
@@ -278,6 +315,111 @@ export function PromptEditor({ docId }: { docId: string }) {
       selection: { anchor: to },
     })
     view.focus()
+    if (getDoc(docId)?.kind !== "prompt") return
+    try {
+      const { id: snippetId, version } = await createSnippetFromText(
+        "new-region",
+        text
+      )
+      viewRef.current?.dispatch({
+        effects: updateRegionEffect.of({
+          id,
+          patch: { snippetId, syncedVersion: version },
+        }),
+      })
+    } catch (e) {
+      reportError(
+        e instanceof Error ? e.message : "Couldn't create the snippet."
+      )
+    }
+  }, [docId])
+
+  // Pull: replace the region's text with the snippet's canonical body and sync
+  // its version. One transaction — the doc change collapses the old span, and the
+  // updateRegionEffect restores explicit bounds (see regionsField's filter order).
+  const pullRegion = useCallback((region: Region) => {
+    const view = viewRef.current
+    if (!view || !region.snippetId) return
+    const snip = getSnippet(region.snippetId)
+    const canonical = getSnippetBody(region.snippetId)
+    if (!snip || canonical === undefined || canonical.length === 0) return
+    const cur = view.state
+      .field(regionsField)
+      .find((r) => r.id === region.id)
+    if (!cur) return
+    view.dispatch({
+      changes: { from: cur.from, to: cur.to, insert: canonical },
+      effects: updateRegionEffect.of({
+        id: region.id,
+        patch: {
+          from: cur.from,
+          to: cur.from + canonical.length,
+          syncedVersion: snip.version,
+        },
+      }),
+    })
+    view.focus()
+  }, [])
+
+  // Push: make the snippet's canonical body this region's current text (bumps the
+  // snippet version, so other references go stale), then sync this region to it.
+  const pushRegion = useCallback(async (region: Region) => {
+    const view = viewRef.current
+    if (!view || !region.snippetId) return
+    const cur = view.state
+      .field(regionsField)
+      .find((r) => r.id === region.id)
+    if (!cur) return
+    const text = view.state.doc.sliceString(cur.from, cur.to)
+    try {
+      const version = await updateSnippetFromRegion(region.snippetId, text)
+      viewRef.current?.dispatch({
+        effects: updateRegionEffect.of({
+          id: region.id,
+          patch: { syncedVersion: version },
+        }),
+      })
+    } catch (e) {
+      reportError(
+        e instanceof Error ? e.message : "Couldn't update the snippet."
+      )
+    }
+  }, [])
+
+  const promoteRegion = useCallback(async (region: Region) => {
+    if (!region.snippetId) return
+    try {
+      await promoteSnippet(region.snippetId)
+    } catch (e) {
+      reportError(e instanceof Error ? e.message : "Couldn't promote.")
+    }
+  }, [])
+
+  // Make an unlinked region reusable: create a snippet from its text and link it.
+  const makeReusable = useCallback(async (region: Region) => {
+    const view = viewRef.current
+    if (!view) return
+    const cur = view.state
+      .field(regionsField)
+      .find((r) => r.id === region.id)
+    if (!cur) return
+    const text = view.state.doc.sliceString(cur.from, cur.to)
+    try {
+      const { id: snippetId, version } = await createSnippetFromText(
+        region.name,
+        text
+      )
+      viewRef.current?.dispatch({
+        effects: updateRegionEffect.of({
+          id: region.id,
+          patch: { snippetId, syncedVersion: version },
+        }),
+      })
+    } catch (e) {
+      reportError(
+        e instanceof Error ? e.message : "Couldn't create the snippet."
+      )
+    }
   }, [])
 
   if (!doc) {
@@ -360,9 +502,14 @@ export function PromptEditor({ docId }: { docId: string }) {
         {!zen && (
           <Inspector
             region={activeRegion}
+            regionText={chrome?.activeRegionText ?? ""}
             readOnly={doc.readOnly}
             onPatch={patchRegion}
             onRemove={removeRegion}
+            onPull={pullRegion}
+            onPush={pushRegion}
+            onPromote={promoteRegion}
+            onMakeReusable={makeReusable}
             className="hidden w-60 shrink-0 border-l @3xl:block"
           />
         )}
@@ -545,19 +692,155 @@ function Ribbon({
 
 // ---- Inspector -----------------------------------------------------------
 
+// The region↔snippet link panel: shows the linked snippet's name, usage, and
+// version, and the region's sync state (in sync / update available / local
+// edits / diverged) with the matching pull / push / promote actions. An
+// unlinked (or dangling) region gets a "make reusable" affordance instead.
+function SnippetLink({
+  region,
+  regionText,
+  snippet,
+  readOnly,
+  onPull,
+  onPush,
+  onPromote,
+  onMakeReusable,
+}: {
+  region: RegionInfo
+  regionText: string
+  snippet: Snippet | undefined
+  readOnly: boolean
+  onPull: (region: Region) => void
+  onPush: (region: Region) => void
+  onPromote: (region: Region) => void
+  onMakeReusable: (region: Region) => void
+}) {
+  // Unlinked, or dangling after its snippet was deleted: offer to (re)link.
+  if (!region.snippetId || !snippet) {
+    return readOnly ? null : (
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => onMakeReusable(region)}
+        className="h-7 w-full justify-center gap-1.5 text-[11px]"
+      >
+        <BookmarkPlus className="size-3.5" /> Make reusable snippet
+      </Button>
+    )
+  }
+
+  const behind = (region.syncedVersion ?? 0) < snippet.version
+  const canonical = getSnippetBody(region.snippetId)
+  const diverged = canonical !== undefined && regionText !== canonical
+  const state = behind && diverged
+    ? "diverged"
+    : behind
+      ? "update"
+      : diverged
+        ? "local"
+        : "synced"
+  const label =
+    state === "synced"
+      ? "in sync"
+      : state === "update"
+        ? "update available"
+        : state === "local"
+          ? "local edits"
+          : "diverged"
+
+  return (
+    <div className="rounded-sm border bg-muted/30 p-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+          {snippet.name}
+        </span>
+        <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+          v{snippet.version}
+        </span>
+      </div>
+      <div className="mt-0.5 text-[10px] text-muted-foreground">
+        snippet · used in {snippet.usedBy}{" "}
+        {snippet.usedBy === 1 ? "place" : "places"} · {label}
+      </div>
+      {!readOnly && (state !== "synced" || !snippet.library) && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {(state === "update" || state === "diverged") && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                if (
+                  state === "diverged" &&
+                  !window.confirm(
+                    "Pull replaces this region's local edits with the snippet's current text. Continue?"
+                  )
+                )
+                  return
+                onPull(region)
+              }}
+              className="h-7 gap-1 text-[11px]"
+            >
+              <ArrowDownToLine className="size-3.5" />
+              {state === "diverged" ? "Pull" : `Update to v${snippet.version}`}
+            </Button>
+          )}
+          {(state === "local" || state === "diverged") && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onPush(region)}
+              className="h-7 gap-1 text-[11px]"
+            >
+              <ArrowUpFromLine className="size-3.5" /> Save as v
+              {snippet.version + 1}
+            </Button>
+          )}
+          {!snippet.library && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => onPromote(region)}
+              className="h-7 gap-1 text-[11px]"
+            >
+              <BookmarkPlus className="size-3.5" /> Add to library
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Inspector({
   region,
+  regionText,
   readOnly,
   onPatch,
   onRemove,
+  onPull,
+  onPush,
+  onPromote,
+  onMakeReusable,
   className,
 }: {
   region: RegionInfo | null
+  regionText: string
   readOnly: boolean
   onPatch: (id: string, patch: Partial<Region>) => void
   onRemove: (id: string) => void
+  onPull: (region: Region) => void
+  onPush: (region: Region) => void
+  onPromote: (region: Region) => void
+  onMakeReusable: (region: Region) => void
   className?: string
 }) {
+  // Subscribe so the link panel reflects live snippet version/usage counts.
+  const lib = useLibrary()
+  const snippet =
+    region?.snippetId != null
+      ? lib.snippets.find((s) => s.id === region.snippetId)
+      : undefined
+
   return (
     <aside className={cn("overflow-y-auto p-4", className)}>
       <h3 className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
@@ -584,6 +867,17 @@ function Inspector({
             }}
             aria-label="Region name"
             className="w-full rounded-sm border border-transparent bg-transparent px-1 py-0.5 font-mono text-[13px] font-semibold focus:border-input focus:outline-none disabled:opacity-70"
+          />
+
+          <SnippetLink
+            region={region}
+            regionText={regionText}
+            snippet={snippet}
+            readOnly={readOnly}
+            onPull={onPull}
+            onPush={onPush}
+            onPromote={onPromote}
+            onMakeReusable={onMakeReusable}
           />
 
           <div>
