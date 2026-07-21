@@ -232,3 +232,67 @@
 .prompt-editor .pi-startline-suspect::before { color: var(--flag-suspect); }
 .prompt-editor .pi-startline-stale::before   { color: var(--flag-stale); }
 .prompt-editor .pi-startline-revisit::before { color: var(--flag-revisit); }
+
+/* ---- Zen focus mode (Phase-0 variant D) ----------------------------------
+   The Cockpit chrome collapses to a centered prose column; X-ray then dims
+   the prose to a ghost and lifts the region structure forward. Both are
+   class-driven so the same CM6 view (cursor, undo, scroll) survives every
+   toggle. */
+.prompt-editor.pe-zen .cm-scroller {
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.85;
+}
+.prompt-editor.pe-zen .cm-content {
+    /* .cm-content is a flex child of .cm-scroller — pin it to a centered
+       measure-width column (mirrors the prototype's overrides). */
+    flex: none !important;
+    width: min(42rem, 100%) !important;
+    max-width: 42rem;
+    margin: 0 auto !important;
+    padding: 48px 24px 35vh;
+    transition: color 0.35s;
+}
+.prompt-editor.pe-zen .pi-md-heading { font-size: 1.1em; }
+
+/* Zen without X-ray: regions recede to a faint section glyph. */
+.prompt-editor.pe-zen .pi-region {
+    border-radius: 3px;
+    transition: background 0.35s, color 0.35s;
+}
+.prompt-editor.pe-zen .pi-flag-ok,
+.prompt-editor.pe-zen .pi-flag-suspect,
+.prompt-editor.pe-zen .pi-flag-stale,
+.prompt-editor.pe-zen .pi-flag-revisit { background: transparent; }
+.prompt-editor.pe-zen .pi-region-startline::before {
+    content: "§ " attr(data-rname);
+    font-size: 10.5px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    padding: 26px 0 4px;
+    color: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+    transition: color 0.35s, font-size 0.35s;
+}
+
+/* X-ray: prose dims to a ghost, regions carry the light. */
+.prompt-editor.pe-xray .cm-content {
+    color: color-mix(in oklch, var(--foreground) 20%, transparent);
+}
+.prompt-editor.pe-xray .pi-md-heading,
+.prompt-editor.pe-xray .pi-md-var,
+.prompt-editor.pe-xray .pi-md-code { color: inherit; }
+.prompt-editor.pe-xray .pi-region {
+    color: color-mix(in oklch, var(--foreground) 62%, transparent);
+}
+.prompt-editor.pe-xray .pi-flag-ok      { background: color-mix(in oklch, var(--flag-ok) 8%, transparent); }
+.prompt-editor.pe-xray .pi-flag-suspect { background: color-mix(in oklch, var(--flag-suspect) 12%, transparent); }
+.prompt-editor.pe-xray .pi-flag-stale   { background: color-mix(in oklch, var(--flag-stale) 12%, transparent); }
+.prompt-editor.pe-xray .pi-flag-revisit { background: color-mix(in oklch, var(--flag-revisit) 12%, transparent); }
+.prompt-editor.pe-xray .pi-region-startline::before {
+    font-size: 13px;
+    letter-spacing: 0.3em;
+}
+.prompt-editor.pe-xray .pi-startline-ok::before      { color: var(--flag-ok); }
+.prompt-editor.pe-xray .pi-startline-suspect::before { color: var(--flag-suspect); content: "§ " attr(data-rname) "  ·  suspect"; }
+.prompt-editor.pe-xray .pi-startline-stale::before   { color: var(--flag-stale); content: "§ " attr(data-rname) "  ·  stale"; }
+.prompt-editor.pe-xray .pi-startline-revisit::before { color: var(--flag-revisit); content: "§ " attr(data-rname) "  ·  revisit"; }
