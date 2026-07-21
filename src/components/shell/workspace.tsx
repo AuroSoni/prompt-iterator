@@ -24,6 +24,9 @@ export interface WorkspaceHandle {
   openDoc: (docId: string) => void
   /** Open a doc in a new slot split right of the active one (⊞). */
   openDocToSide: (docId: string) => void
+  /** Close any slots showing these docs — e.g. after a doc (and its versions)
+   *  are deleted, so no pane lingers on a now-missing document. */
+  closeDocs: (docIds: string[]) => void
 }
 
 interface WorkspaceProps {
@@ -140,9 +143,27 @@ export function Workspace({
     [openDoc, sync]
   )
 
-  useImperativeHandle(ref, () => ({ openDoc, openDocToSide }), [
+  const closeDocs = useCallback(
+    (docIds: string[]) => {
+      const api = apiRef.current
+      if (!api || docIds.length === 0) return
+      const targets = new Set(docIds)
+      // Copy the list: panel.api.close() mutates api.panels as we iterate.
+      for (const panel of [...api.panels]) {
+        const id = docIdOf(panel)
+        if (id !== null && targets.has(id)) panel.api.close()
+      }
+      // onDidRemovePanel fires sync() per close; call once more in case nothing
+      // matched so open/active state is always reconciled.
+      sync()
+    },
+    [sync]
+  )
+
+  useImperativeHandle(ref, () => ({ openDoc, openDocToSide, closeDocs }), [
     openDoc,
     openDocToSide,
+    closeDocs,
   ])
 
   const disposablesRef = useRef<Array<{ dispose(): void }>>([])

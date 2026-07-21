@@ -38,6 +38,8 @@ export interface Prompt {
   tokens: number
   /** Version number the working copy was last saved as. */
   currentVersion: number
+  /** Stable list position; also the basis for a new prompt's sort_order. */
+  sortOrder: number
   versions: PromptVersion[]
 }
 
@@ -50,6 +52,8 @@ export interface Snippet {
   usedBy: number
   /** How many of those prompts hold an older snippet version than current. */
   stale: number
+  /** Stable list position; also the basis for a new snippet's sort_order. */
+  sortOrder: number
 }
 
 /** A resolved, openable document — what an editor slot displays. */
@@ -364,7 +368,7 @@ interface LibraryData {
 /** Build the full in-memory library from the seeds above. Pure — no I/O. */
 function buildSeedData(): LibraryData {
   const docs = new Map<string, Doc>()
-  const prompts: Prompt[] = PROMPT_SEEDS.map((seed) => {
+  const prompts: Prompt[] = PROMPT_SEEDS.map((seed, i) => {
     const working = buildDocBody(seed.parts)
     const versions: PromptVersion[] = seed.history.map(([n, message, savedAt]) => {
       // Older snapshots drop trailing parts so the history visibly grows.
@@ -406,11 +410,12 @@ function buildSeedData(): LibraryData {
       name: seed.name,
       tokens: approxTokens(working.body),
       currentVersion: seed.currentVersion,
+      sortOrder: i,
       versions,
     }
   })
 
-  const snippets: Snippet[] = SNIPPET_SEEDS.map((seed) => {
+  const snippets: Snippet[] = SNIPPET_SEEDS.map((seed, i) => {
     docs.set(seed.id, {
       id: seed.id,
       kind: "snippet",
@@ -427,6 +432,7 @@ function buildSeedData(): LibraryData {
       version: seed.version,
       usedBy: seed.usedBy,
       stale: seed.stale,
+      sortOrder: i,
     }
   })
 
@@ -536,6 +542,7 @@ function domainFromRows(
       name: pr.name,
       tokens: pr.tokens,
       currentVersion: pr.current_version,
+      sortOrder: pr.sort_order,
       versions,
     }
   })
@@ -557,6 +564,7 @@ function domainFromRows(
       version: sr.version,
       usedBy: sr.used_by,
       stale: sr.stale,
+      sortOrder: sr.sort_order,
     }
   })
 
@@ -578,6 +586,9 @@ let error: string | null = null
  *  unconfigured OR when a load error dropped us to in-memory seeds, so write-
  *  through can never clobber rows we failed to read. */
 let persistent = false
+/** Guards one-time registration of the tab-hide/close flush listeners so a
+ *  re-login (which re-runs runHydrate) can't stack duplicates. */
+let flushListenersRegistered = false
 
 export interface LibrarySnapshot {
   prompts: Prompt[]
@@ -646,11 +657,15 @@ async function runHydrate(): Promise<void> {
     // Flush the last debounced edit when the tab is hidden or closed.
     // visibilitychange fires while the page is still alive (reliable on tab
     // switch / mobile background); beforeunload is a weaker last resort whose
-    // fetch the browser may cancel mid-unload.
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") flushPending()
-    })
-    window.addEventListener("beforeunload", flushPending)
+    // fetch the browser may cancel mid-unload. Registered once for the app's
+    // lifetime — they read live module state, so re-login needn't re-add them.
+    if (!flushListenersRegistered) {
+      flushListenersRegistered = true
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") flushPending()
+      })
+      window.addEventListener("beforeunload", flushPending)
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     console.warn("[library] Supabase unavailable — using in-memory seeds:", msg)
@@ -665,20 +680,32 @@ async function runHydrate(): Promise<void> {
 
 async function loadFromSupabase(seed: LibraryData): Promise<LibraryData> {
   const sb = supabase!
-  const rows = await fetchAll(sb)
-  // Seed a fresh DB — and heal one left half-populated by an interrupted seed.
-  // Snippets are inserted last, so "snippets empty" (whatever else is present)
-  // means the seed never finished. No delete-all feature exists yet, so this
-  // can't misfire on a user who legitimately cleared their snippets.
-  const needsSeed = rows.promptRows.length === 0 || rows.snippetRows.length === 0
-  if (!needsSeed) {
+  const [seeded, rows] = await Promise.all([hasSeedMarker(sb), fetchAll(sb)])
+  // Seed only when the marker is absent — a true first run, or a first seed that
+  // was interrupted before writing it. Because the check is the marker (not
+  // "tables empty"), a user who deletes every prompt does NOT get reseeded.
+  if (seeded) {
     return domainFromRows(rows.promptRows, rows.versionRows, rows.snippetRows)
   }
   await seedSupabase(seed)
   // Re-read rather than returning the seed: on a heal the prompts table may
   // already hold the user's edits, which the idempotent seed left untouched.
-  const seeded = await fetchAll(sb)
-  return domainFromRows(seeded.promptRows, seeded.versionRows, seeded.snippetRows)
+  const filled = await fetchAll(sb)
+  return domainFromRows(filled.promptRows, filled.versionRows, filled.snippetRows)
+}
+
+/** Has the sample library already been seeded? Tracked by a durable server-side
+ *  marker row so a delete-all stays deleted (see 0002_app_meta.sql). */
+async function hasSeedMarker(
+  sb: NonNullable<typeof supabase>
+): Promise<boolean> {
+  const { data, error: e } = await sb
+    .from("app_meta")
+    .select("key")
+    .eq("key", "seeded")
+    .maybeSingle()
+  if (e) throw e
+  return data !== null
 }
 
 async function fetchAll(sb: NonNullable<typeof supabase>): Promise<{
@@ -716,6 +743,13 @@ async function seedSupabase(seed: LibraryData): Promise<void> {
   }
   const s = await sb.from("snippets").upsert(snippetRows, opts)
   if (s.error) throw s.error
+  // Marker LAST: its presence is the "seed completed" signal read by
+  // hasSeedMarker. If any step above failed, the marker is never written and the
+  // next load heals via the same idempotent upserts.
+  const m = await sb
+    .from("app_meta")
+    .upsert({ key: "seeded", value: {} }, { onConflict: "key", ignoreDuplicates: true })
+  if (m.error) throw m.error
 }
 
 // ---- Reads ---------------------------------------------------------------
@@ -824,4 +858,180 @@ export function updateDocContent(
     pending.set(id, { kind: doc.kind, body, regions, tokens })
     scheduleFlush()
   }
+}
+
+// ---- Structural writes (create / rename / delete) ------------------------
+// These change the library's SHAPE, not just a doc's body, so they are
+// await-first: when persistent, the Supabase row is written (and confirmed)
+// BEFORE the store mutates. That way the UI never shows a row that failed to
+// persist, and a new row's INSERT always precedes any debounced body UPDATE the
+// editor might queue for it.
+
+/** Next free sort_order for a list (append at the end). Integer-safe, unlike
+ *  Date.now() which overflows Postgres `integer`. */
+function nextSortOrder(list: { sortOrder: number }[]): number {
+  return Math.max(-1, ...list.map((x) => x.sortOrder)) + 1
+}
+
+/** Create a blank prompt and return its id. Persists first when backed by a DB. */
+export async function createPrompt(name: string): Promise<string> {
+  const id = `p_${crypto.randomUUID()}`
+  const sortOrder = nextSortOrder(prompts)
+  const tokens = approxTokens("")
+  if (persistent && supabase) {
+    const { error: e } = await supabase.from("prompts").insert({
+      id,
+      name,
+      body: "",
+      regions: [],
+      tokens,
+      current_version: 0,
+      sort_order: sortOrder,
+    })
+    if (e) throw e
+  }
+  docs.set(id, {
+    id,
+    kind: "prompt",
+    title: name,
+    tokens,
+    readOnly: false,
+    body: "",
+    regions: [],
+  })
+  prompts = [
+    ...prompts,
+    { id, name, tokens, currentVersion: 0, sortOrder, versions: [] },
+  ]
+  emit()
+  return id
+}
+
+/** Create a blank snippet and return its id. */
+export async function createSnippet(name: string): Promise<string> {
+  const id = `s_${crypto.randomUUID()}`
+  const sortOrder = nextSortOrder(snippets)
+  const tokens = approxTokens("")
+  if (persistent && supabase) {
+    const { error: e } = await supabase.from("snippets").insert({
+      id,
+      name,
+      body: "",
+      regions: [],
+      tokens,
+      version: 1,
+      used_by: 0,
+      stale: 0,
+      sort_order: sortOrder,
+    })
+    if (e) throw e
+  }
+  docs.set(id, {
+    id,
+    kind: "snippet",
+    title: name,
+    tokens,
+    readOnly: false,
+    body: "",
+    regions: [],
+  })
+  snippets = [
+    ...snippets,
+    { id, name, tokens, version: 1, usedBy: 0, stale: 0, sortOrder },
+  ]
+  emit()
+  return id
+}
+
+/** Rename a prompt or snippet. No-ops on empty/unchanged names and version docs. */
+export async function renameDoc(id: string, name: string): Promise<void> {
+  const doc = docs.get(id)
+  if (!doc || (doc.kind !== "prompt" && doc.kind !== "snippet")) return
+  const trimmed = name.trim()
+  if (!trimmed || trimmed === doc.title) return
+  if (persistent && supabase) {
+    const res =
+      doc.kind === "prompt"
+        ? await supabase.from("prompts").update({ name: trimmed }).eq("id", id)
+        : await supabase.from("snippets").update({ name: trimmed }).eq("id", id)
+    if (res.error) throw res.error
+  }
+  docs.set(id, { ...doc, title: trimmed })
+  if (doc.kind === "prompt") {
+    prompts = prompts.map((p) => (p.id === id ? { ...p, name: trimmed } : p))
+  } else {
+    snippets = snippets.map((s) => (s.id === id ? { ...s, name: trimmed } : s))
+  }
+  emit()
+}
+
+/** Delete a prompt (its versions cascade) or a snippet. Returns the ids removed
+ *  from the store — the prompt/snippet plus any version docs — so the caller can
+ *  close their editor panes. Version docs are read-only history and can't be
+ *  deleted directly. */
+export async function deleteDoc(id: string): Promise<string[]> {
+  const doc = docs.get(id)
+  if (!doc || (doc.kind !== "prompt" && doc.kind !== "snippet")) return []
+  if (persistent && supabase) {
+    const res =
+      doc.kind === "prompt"
+        ? await supabase.from("prompts").delete().eq("id", id)
+        : await supabase.from("snippets").delete().eq("id", id)
+    if (res.error) throw res.error
+  }
+  // A queued body write for this id must not fire against the deleted row.
+  pending.delete(id)
+
+  const removed = [id]
+  if (doc.kind === "prompt") {
+    const prompt = prompts.find((p) => p.id === id)
+    for (const v of prompt?.versions ?? []) {
+      docs.delete(v.id)
+      removed.push(v.id)
+    }
+    prompts = prompts.filter((p) => p.id !== id)
+  } else {
+    snippets = snippets.filter((s) => s.id !== id)
+  }
+  docs.delete(id)
+  emit()
+  return removed
+}
+
+// ---- Session lifecycle ---------------------------------------------------
+
+/** Await all pending writes now, then resolve — used by sign-out before the
+ *  session (and its JWT) is revoked, so the last debounced edit lands first. */
+export async function flushPendingNow(): Promise<void> {
+  if (flushTimer) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+  await runFlush()
+}
+
+/** Surface a one-off message on the shared banner — used by the structural CRUD
+ *  handlers, whose await-first writes can reject. Pass null to clear. */
+export function reportError(message: string | null): void {
+  if (message === error) return
+  error = message
+  emit()
+}
+
+/** Tear the store back to its pre-hydrate state on sign-out: no data lingers
+ *  after logout, and a re-login re-runs hydrate() from scratch. */
+export function resetLibrary(): void {
+  if (flushTimer) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+  pending.clear()
+  prompts = []
+  snippets = []
+  docs = new Map()
+  status = "loading"
+  error = null
+  persistent = false
+  hydratePromise = null
+  emit()
 }

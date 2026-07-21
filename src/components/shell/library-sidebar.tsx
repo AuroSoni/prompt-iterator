@@ -1,13 +1,35 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import type { ReactNode } from "react"
 import {
   ChevronRight,
+  LogOut,
+  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
+  Plus,
   SquareSplitHorizontal,
+  Trash2,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { KindBadge } from "@/components/shell/editor-slot"
 import { fmtTokens, useLibrary, type Prompt } from "@/lib/library"
 import { cn } from "@/lib/utils"
@@ -19,6 +41,20 @@ interface LibrarySidebarProps {
   openDocIds: string[]
   onOpenDoc: (docId: string) => void
   onOpenDocToSide: (docId: string) => void
+  /** Create a blank prompt/snippet; resolves to its id (null on failure). */
+  onCreatePrompt: () => Promise<string | null>
+  onCreateSnippet: () => Promise<string | null>
+  onRenameDoc: (docId: string, name: string) => void
+  onDeleteDoc: (docId: string) => void
+  /** Present only when Supabase is configured (there's a session to end). */
+  onSignOut?: () => void
+}
+
+/** A prompt/snippet being confirmed for deletion. */
+interface DeleteTarget {
+  id: string
+  name: string
+  kind: "prompt" | "snippet"
 }
 
 interface RowProps {
@@ -28,6 +64,8 @@ interface RowProps {
   indent?: boolean
   onOpen: (docId: string) => void
   onOpenToSide: (docId: string) => void
+  /** Trailing per-row controls (e.g. the ⋯ menu). Absent on version rows. */
+  actions?: ReactNode
   children: ReactNode
 }
 
@@ -39,6 +77,7 @@ function Row({
   indent,
   onOpen,
   onOpenToSide,
+  actions,
   children,
 }: RowProps) {
   return (
@@ -80,25 +119,126 @@ function Row({
       >
         <SquareSplitHorizontal className="size-3.5" />
       </button>
+      {actions}
     </div>
   )
 }
 
-function SectionLabel({
-  className,
-  children,
+/** The hover ⋯ menu with Rename / Delete. Deferred with setTimeout so the menu
+ *  finishes closing (and returns focus) before we mount the rename input or the
+ *  delete dialog. */
+function RowMenu({
+  onRename,
+  onDelete,
 }: {
-  className?: string
-  children: ReactNode
+  onRename: () => void
+  onDelete: () => void
 }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          onClick={(e) => e.stopPropagation()}
+          className="invisible inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground group-hover/row:visible aria-expanded:visible hover:bg-sidebar-accent hover:text-foreground"
+          title="More actions"
+          aria-label="More actions"
+        >
+          <MoreHorizontal className="size-3.5" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={() => setTimeout(onRename, 0)}>
+          <Pencil />
+          Rename
+        </DropdownMenuItem>
+        <DropdownMenuItem variant="destructive" onSelect={() => setTimeout(onDelete, 0)}>
+          <Trash2 />
+          Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+/** Inline rename field shown in place of a row. Commits on Enter/blur, cancels
+ *  on Esc; the doneRef guard stops the unmount blur from firing a second time
+ *  (and from overriding a cancel). */
+function InlineRenameRow({
+  initial,
+  indent,
+  icon,
+  onCommit,
+  onCancel,
+}: {
+  initial: string
+  indent?: boolean
+  icon: ReactNode
+  onCommit: (name: string) => void
+  onCancel: () => void
+}) {
+  const [value, setValue] = useState(initial)
+  const doneRef = useRef(false)
   return (
     <div
       className={cn(
-        "px-2 pt-1 pb-1.5 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase",
-        className
+        "flex h-7 items-center gap-1.5 rounded-md pr-1",
+        indent ? "pl-8" : "pl-2"
       )}
     >
-      {children}
+      {icon}
+      <Input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onFocus={(e) => e.target.select()}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          e.stopPropagation()
+          if (e.key === "Enter") {
+            doneRef.current = true
+            onCommit(value)
+          } else if (e.key === "Escape") {
+            doneRef.current = true
+            onCancel()
+          }
+        }}
+        onBlur={() => {
+          if (!doneRef.current) onCommit(value)
+        }}
+        className="h-6 flex-1 px-1.5 text-[13px]"
+        aria-label="Rename"
+      />
+    </div>
+  )
+}
+
+function SectionHeader({
+  children,
+  onAdd,
+  addLabel,
+  className,
+}: {
+  children: ReactNode
+  onAdd: () => void
+  addLabel: string
+  className?: string
+}) {
+  return (
+    <div className={cn("flex items-center justify-between pr-1", className)}>
+      <span className="px-2 pt-1 pb-1.5 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
+        {children}
+      </span>
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        onClick={onAdd}
+        title={addLabel}
+        aria-label={addLabel}
+        className="text-muted-foreground"
+      >
+        <Plus />
+      </Button>
     </div>
   )
 }
@@ -106,7 +246,12 @@ function SectionLabel({
 interface PromptItemProps {
   prompt: Prompt
   expanded: boolean
+  editing: boolean
   onToggleExpanded: () => void
+  onStartRename: (id: string) => void
+  onCommitRename: (id: string, name: string) => void
+  onCancelRename: () => void
+  onRequestDelete: (target: DeleteTarget) => void
   rowProps: Pick<
     LibrarySidebarProps,
     "activeDocId" | "openDocIds" | "onOpenDoc" | "onOpenDocToSide"
@@ -116,10 +261,27 @@ interface PromptItemProps {
 function PromptItem({
   prompt,
   expanded,
+  editing,
   onToggleExpanded,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onRequestDelete,
   rowProps,
 }: PromptItemProps) {
   const { activeDocId, openDocIds, onOpenDoc, onOpenDocToSide } = rowProps
+
+  if (editing) {
+    return (
+      <InlineRenameRow
+        initial={prompt.name}
+        icon={<KindBadge kind="prompt" className="size-3.5 text-[9px]" />}
+        onCommit={(name) => onCommitRename(prompt.id, name)}
+        onCancel={onCancelRename}
+      />
+    )
+  }
+
   return (
     <div>
       <Row
@@ -128,6 +290,14 @@ function PromptItem({
         open={openDocIds.includes(prompt.id)}
         onOpen={onOpenDoc}
         onOpenToSide={onOpenDocToSide}
+        actions={
+          <RowMenu
+            onRename={() => onStartRename(prompt.id)}
+            onDelete={() =>
+              onRequestDelete({ id: prompt.id, name: prompt.name, kind: "prompt" })
+            }
+          />
+        }
       >
         <button
           type="button"
@@ -187,10 +357,32 @@ export function LibrarySidebar({
   openDocIds,
   onOpenDoc,
   onOpenDocToSide,
+  onCreatePrompt,
+  onCreateSnippet,
+  onRenameDoc,
+  onDeleteDoc,
+  onSignOut,
 }: LibrarySidebarProps) {
   const { prompts, snippets } = useLibrary()
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const rowProps = { activeDocId, openDocIds, onOpenDoc, onOpenDocToSide }
+
+  const commitRename = (id: string, name: string) => {
+    setEditingId(null)
+    onRenameDoc(id, name)
+  }
+  const cancelRename = () => setEditingId(null)
+
+  const newPrompt = async () => {
+    const id = await onCreatePrompt()
+    if (id) setEditingId(id)
+  }
+  const newSnippet = async () => {
+    const id = await onCreateSnippet()
+    if (id) setEditingId(id)
+  }
 
   if (collapsed) {
     return (
@@ -224,43 +416,130 @@ export function LibrarySidebar({
           <PanelLeftClose />
         </Button>
       </header>
+
       <nav className="min-h-0 flex-1 overflow-y-auto p-2">
-        <SectionLabel>Prompts</SectionLabel>
+        <SectionHeader onAdd={() => void newPrompt()} addLabel="New prompt">
+          Prompts
+        </SectionHeader>
         {prompts.map((prompt) => (
           <PromptItem
             key={prompt.id}
             prompt={prompt}
             expanded={!!expanded[prompt.id]}
+            editing={editingId === prompt.id}
             onToggleExpanded={() =>
               setExpanded((e) => ({ ...e, [prompt.id]: !e[prompt.id] }))
             }
+            onStartRename={setEditingId}
+            onCommitRename={commitRename}
+            onCancelRename={cancelRename}
+            onRequestDelete={setDeleteTarget}
             rowProps={rowProps}
           />
         ))}
-        <SectionLabel className="mt-4">Snippets</SectionLabel>
-        {snippets.map((snippet) => (
-          <Row
-            key={snippet.id}
-            docId={snippet.id}
-            active={activeDocId === snippet.id}
-            open={openDocIds.includes(snippet.id)}
-            onOpen={onOpenDoc}
-            onOpenToSide={onOpenDocToSide}
-          >
-            <KindBadge kind="snippet" className="size-3.5 text-[9px]" />
-            <span className="min-w-0 flex-1 truncate">{snippet.name}</span>
-            {snippet.stale > 0 && (
-              <span
-                className="size-1.5 shrink-0 rounded-full bg-amber-500"
-                title={`${snippet.stale} of ${snippet.usedBy} using prompts are stale`}
-              />
-            )}
-            <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-              {snippet.usedBy} use{snippet.usedBy === 1 ? "" : "s"}
-            </span>
-          </Row>
-        ))}
+
+        <SectionHeader
+          onAdd={() => void newSnippet()}
+          addLabel="New snippet"
+          className="mt-4"
+        >
+          Snippets
+        </SectionHeader>
+        {snippets.map((snippet) =>
+          editingId === snippet.id ? (
+            <InlineRenameRow
+              key={snippet.id}
+              initial={snippet.name}
+              icon={<KindBadge kind="snippet" className="size-3.5 text-[9px]" />}
+              onCommit={(name) => commitRename(snippet.id, name)}
+              onCancel={cancelRename}
+            />
+          ) : (
+            <Row
+              key={snippet.id}
+              docId={snippet.id}
+              active={activeDocId === snippet.id}
+              open={openDocIds.includes(snippet.id)}
+              onOpen={onOpenDoc}
+              onOpenToSide={onOpenDocToSide}
+              actions={
+                <RowMenu
+                  onRename={() => setEditingId(snippet.id)}
+                  onDelete={() =>
+                    setDeleteTarget({
+                      id: snippet.id,
+                      name: snippet.name,
+                      kind: "snippet",
+                    })
+                  }
+                />
+              }
+            >
+              <KindBadge kind="snippet" className="size-3.5 text-[9px]" />
+              <span className="min-w-0 flex-1 truncate">{snippet.name}</span>
+              {snippet.stale > 0 && (
+                <span
+                  className="size-1.5 shrink-0 rounded-full bg-amber-500"
+                  title={`${snippet.stale} of ${snippet.usedBy} using prompts are stale`}
+                />
+              )}
+              <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                {snippet.usedBy} use{snippet.usedBy === 1 ? "" : "s"}
+              </span>
+            </Row>
+          )
+        )}
       </nav>
+
+      {onSignOut && (
+        <div className="shrink-0 border-t p-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onSignOut}
+            className="w-full justify-start gap-2 text-muted-foreground"
+          >
+            <LogOut className="size-3.5" />
+            Sign out
+          </Button>
+        </div>
+      )}
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete “{deleteTarget?.name}”?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget?.kind === "prompt"
+                ? "This permanently deletes the prompt and its saved version history. This can't be undone."
+                : "This permanently deletes the snippet. This can't be undone."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button variant="outline">Cancel</Button>
+            </AlertDialogCancel>
+            <AlertDialogAction asChild>
+              <Button
+                variant="destructive"
+                onClick={() => {
+                  if (deleteTarget) onDeleteDoc(deleteTarget.id)
+                  setDeleteTarget(null)
+                }}
+              >
+                Delete
+              </Button>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </aside>
   )
 }

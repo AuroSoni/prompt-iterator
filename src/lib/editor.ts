@@ -40,6 +40,9 @@ export const updateRegionEffect = StateEffect.define<{
   id: string
   patch: Partial<Region>
 }>()
+/** Remove a region annotation by id. The underlying text is left untouched —
+ *  regions are an overlay, not a partition. */
+export const removeRegionEffect = StateEffect.define<string>()
 
 export const regionsField = StateField.define<Region[]>({
   create: () => [],
@@ -61,6 +64,9 @@ export const regionsField = StateField.define<Region[]>({
       if (e.is(updateRegionEffect)) {
         const { id, patch } = e.value
         rs = rs.map((r) => (r.id === id ? { ...r, ...patch } : r))
+      }
+      if (e.is(removeRegionEffect)) {
+        rs = rs.filter((r) => r.id !== e.value)
       }
     }
     return rs

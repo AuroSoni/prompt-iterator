@@ -19,7 +19,13 @@ export const isSupabaseConfigured = Boolean(url && anonKey)
 /** The client, or null when unconfigured. Callers must handle the null case. */
 export const supabase: SupabaseClient<Database> | null = isSupabaseConfigured
   ? createClient<Database>(url as string, anonKey as string, {
-      // No login flow — anon key only — so there is no session to persist.
-      auth: { persistSession: false, autoRefreshToken: false },
+      auth: {
+        // Email+password login gate (see src/lib/auth.ts): persist the session
+        // across reloads and keep the access token fresh. No redirect-based flow
+        // (magic link / OAuth), so skip parsing the URL for a session.
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: false,
+      },
     })
   : null

@@ -85,12 +85,28 @@ interface SnippetsTable {
   Relationships: []
 }
 
+// Key/value app metadata (see supabase/migrations/0002_app_meta.sql). Holds the
+// `seeded` marker so a delete-all doesn't trigger a reseed.
+interface AppMetaTable {
+  Row: {
+    key: string
+    value: Record<string, unknown>
+  }
+  Insert: {
+    key: string
+    value?: Record<string, unknown>
+  }
+  Update: Partial<AppMetaTable["Insert"]>
+  Relationships: []
+}
+
 export interface Database {
   public: {
     Tables: {
       prompts: PromptsTable
       prompt_versions: PromptVersionsTable
       snippets: SnippetsTable
+      app_meta: AppMetaTable
     }
     Views: Record<string, never>
     Functions: Record<string, never>

@@ -21,7 +21,7 @@ import {
   lineNumbers,
 } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
-import { Lock } from "lucide-react"
+import { Lock, Trash2 } from "lucide-react"
 
 import {
   addRegionEffect,
@@ -31,12 +31,14 @@ import {
   regionExtensions,
   regionInfos,
   regionsField,
+  removeRegionEffect,
   ribbonSegments,
   scrollToRegion,
   updateRegionEffect,
 } from "@/lib/editor"
 import type { Flag, Region, RegionInfo, RibbonSegment } from "@/lib/editor"
 import { getDoc, updateDocContent } from "@/lib/library"
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 function flagColor(flag: Flag): string {
@@ -251,6 +253,14 @@ export function PromptEditor({ docId }: { docId: string }) {
     viewRef.current?.dispatch({ effects: updateRegionEffect.of({ id, patch }) })
   }, [])
 
+  // Drop a region's annotation (name/flag/note); the prose it covered stays.
+  const removeRegion = useCallback((id: string) => {
+    const view = viewRef.current
+    if (!view) return
+    view.dispatch({ effects: removeRegionEffect.of(id) })
+    view.focus()
+  }, [])
+
   const markSelection = useCallback(() => {
     const view = viewRef.current
     if (!view) return
@@ -352,6 +362,7 @@ export function PromptEditor({ docId }: { docId: string }) {
             region={activeRegion}
             readOnly={doc.readOnly}
             onPatch={patchRegion}
+            onRemove={removeRegion}
             className="hidden w-60 shrink-0 border-l @3xl:block"
           />
         )}
@@ -538,11 +549,13 @@ function Inspector({
   region,
   readOnly,
   onPatch,
+  onRemove,
   className,
 }: {
   region: RegionInfo | null
   readOnly: boolean
   onPatch: (id: string, patch: Partial<Region>) => void
+  onRemove: (id: string) => void
   className?: string
 }) {
   return (
@@ -641,6 +654,21 @@ function Inspector({
               </div>
             </div>
           </div>
+
+          {/* Removing the annotation leaves the prose it covered in place. */}
+          {!readOnly && (
+            <div className="border-t pt-3">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => onRemove(region.id)}
+                className="h-8 w-full justify-start gap-2 px-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              >
+                <Trash2 className="size-3.5" />
+                Remove region
+              </Button>
+            </div>
+          )}
         </div>
       )}
     </aside>
