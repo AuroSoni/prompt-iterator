@@ -19,7 +19,7 @@ These are product constraints, not TODOs. If a request seems to need one of them
 
 ### Public repository
 
-This repo is **public**. Do not commit secrets, internal URLs, customer data, or private Nova Labs details. Given the boundaries above there is no backend and no API key to handle — if a task appears to require one, that is a signal the task is out of scope.
+This repo is **public**. Do not commit secrets, internal URLs, customer data, or private Nova Labs details. Storage is Supabase (single-user; see README): only the publishable anon key may ever appear in client code — service-role keys and access tokens must never enter the repo. There is no server of our own and no LLM API key — a task appearing to need either is a signal it's out of scope.
 
 ## Commands
 
