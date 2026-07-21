@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Env — real keys live in .env.local (ignored by *.local above). These extra
+# lines make sure a plain .env can never be committed to this public repo;
+# .env.example is the tracked template.
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -1,12 +1,25 @@
-// In-memory sample library so the shell has real shapes to arrange.
-// Phase 1 proper replaces this with Supabase-backed data; the types mirror the
-// intended schema (prompts → versions, snippets with usage links).
+// The library store: prompts → versions, snippets, and the resolved docs an
+// editor slot opens. Backed by Supabase when configured (see src/lib/supabase.ts
+// and supabase/migrations/0001_init.sql); otherwise it runs on the in-memory
+// seed data below so a fresh clone of this public repo works with no backend.
+//
+// Shape of the store:
+//   - hydrate() loads once (Supabase → seed-if-empty → fall back to seeds on
+//     error). Call it at startup and gate the shell on `status`.
+//   - useLibrary() is a reactive view of { prompts, snippets, status, error }.
+//   - getDoc() stays synchronous (the editor reads it at mount, after hydrate).
+//   - updateDocContent() writes the cache through to Supabase on a debounce.
 //
 // Doc bodies are built from parts so region offsets are computed, never
-// hand-counted (same principle as the Phase-0 sample-data.js).
+// hand-counted (same principle as the Phase-0 sample-data.js). Regions travel
+// with their body as one JSONB value, so offsets can never desync from text.
+
+import { useSyncExternalStore } from "react"
 
 import { approxTokens } from "@/lib/editor"
 import type { Region } from "@/lib/editor"
+import type { Database } from "@/lib/database.types"
+import { supabase } from "@/lib/supabase"
 
 export type DocKind = "prompt" | "snippet" | "version"
 
@@ -222,7 +235,7 @@ function fillerParts(promptId: string, title: string, sections: number): DocPart
   }))
 }
 
-// ---- Prompts, versions, snippets ----------------------------------------
+// ---- Seeds ---------------------------------------------------------------
 
 interface PromptSeed {
   id: string
@@ -340,91 +353,475 @@ The examples below are load-bearing: they anchor tone, format, and escalation be
   },
 ]
 
-// ---- Built library -------------------------------------------------------
+// ---- Seed → domain -------------------------------------------------------
 
-const DOCS = new Map<string, Doc>()
-
-export const PROMPTS: Prompt[] = PROMPT_SEEDS.map((seed) => {
-  const working = buildDocBody(seed.parts)
-  const versions: PromptVersion[] = seed.history.map(([n, message, savedAt]) => {
-    // Older snapshots drop trailing parts so the history visibly grows.
-    const kept = Math.max(2, seed.parts.length - (seed.currentVersion - n))
-    const snapshot = buildDocBody([
-      {
-        region: null,
-        text: `> Snapshot v${n} — “${message}” (${savedAt})`,
-      },
-      ...seed.parts.slice(0, kept),
-    ])
-    const id = `${seed.id}v${n}`
-    DOCS.set(id, {
-      id,
-      kind: "version",
-      title: `${seed.name} · v${n}`,
-      tokens: approxTokens(snapshot.body),
-      readOnly: true,
-      body: snapshot.body,
-      regions: snapshot.regions,
-    })
-    return {
-      id,
-      promptId: seed.id,
-      n,
-      message,
-      savedAt,
-      tokens: approxTokens(snapshot.body),
-    }
-  })
-  DOCS.set(seed.id, {
-    id: seed.id,
-    kind: "prompt",
-    title: seed.name,
-    tokens: approxTokens(working.body),
-    readOnly: false,
-    body: working.body,
-    regions: working.regions,
-  })
-  return {
-    id: seed.id,
-    name: seed.name,
-    tokens: approxTokens(working.body),
-    currentVersion: seed.currentVersion,
-    versions,
-  }
-})
-
-export const SNIPPETS: Snippet[] = SNIPPET_SEEDS.map((seed) => {
-  DOCS.set(seed.id, {
-    id: seed.id,
-    kind: "snippet",
-    title: seed.name,
-    tokens: approxTokens(seed.body),
-    readOnly: false,
-    body: seed.body,
-    regions: [],
-  })
-  return {
-    id: seed.id,
-    name: seed.name,
-    tokens: approxTokens(seed.body),
-    version: seed.version,
-    usedBy: seed.usedBy,
-    stale: seed.stale,
-  }
-})
-
-export function getDoc(id: string): Doc | undefined {
-  return DOCS.get(id)
+interface LibraryData {
+  prompts: Prompt[]
+  snippets: Snippet[]
+  docs: Map<string, Doc>
 }
 
-/** Editor writeback: the in-memory store is the source of truth, so a slot
- *  switching docs and back keeps its edits. Supabase persistence lands later. */
+/** Build the full in-memory library from the seeds above. Pure — no I/O. */
+function buildSeedData(): LibraryData {
+  const docs = new Map<string, Doc>()
+  const prompts: Prompt[] = PROMPT_SEEDS.map((seed) => {
+    const working = buildDocBody(seed.parts)
+    const versions: PromptVersion[] = seed.history.map(([n, message, savedAt]) => {
+      // Older snapshots drop trailing parts so the history visibly grows.
+      const kept = Math.max(2, seed.parts.length - (seed.currentVersion - n))
+      const snapshot = buildDocBody([
+        { region: null, text: `> Snapshot v${n} — “${message}” (${savedAt})` },
+        ...seed.parts.slice(0, kept),
+      ])
+      const id = `${seed.id}v${n}`
+      docs.set(id, {
+        id,
+        kind: "version",
+        title: `${seed.name} · v${n}`,
+        tokens: approxTokens(snapshot.body),
+        readOnly: true,
+        body: snapshot.body,
+        regions: snapshot.regions,
+      })
+      return {
+        id,
+        promptId: seed.id,
+        n,
+        message,
+        savedAt,
+        tokens: approxTokens(snapshot.body),
+      }
+    })
+    docs.set(seed.id, {
+      id: seed.id,
+      kind: "prompt",
+      title: seed.name,
+      tokens: approxTokens(working.body),
+      readOnly: false,
+      body: working.body,
+      regions: working.regions,
+    })
+    return {
+      id: seed.id,
+      name: seed.name,
+      tokens: approxTokens(working.body),
+      currentVersion: seed.currentVersion,
+      versions,
+    }
+  })
+
+  const snippets: Snippet[] = SNIPPET_SEEDS.map((seed) => {
+    docs.set(seed.id, {
+      id: seed.id,
+      kind: "snippet",
+      title: seed.name,
+      tokens: approxTokens(seed.body),
+      readOnly: false,
+      body: seed.body,
+      regions: [],
+    })
+    return {
+      id: seed.id,
+      name: seed.name,
+      tokens: approxTokens(seed.body),
+      version: seed.version,
+      usedBy: seed.usedBy,
+      stale: seed.stale,
+    }
+  })
+
+  return { prompts, snippets, docs }
+}
+
+// ---- Supabase row mapping ------------------------------------------------
+
+type PromptRow = Database["public"]["Tables"]["prompts"]["Row"]
+type VersionRow = Database["public"]["Tables"]["prompt_versions"]["Row"]
+type SnippetRow = Database["public"]["Tables"]["snippets"]["Row"]
+type PromptInsert = Database["public"]["Tables"]["prompts"]["Insert"]
+type VersionInsert = Database["public"]["Tables"]["prompt_versions"]["Insert"]
+type SnippetInsert = Database["public"]["Tables"]["snippets"]["Insert"]
+
+/** Derive insert rows from built seed data (used to populate an empty table). */
+function rowsFromSeed(seed: LibraryData): {
+  promptRows: PromptInsert[]
+  versionRows: VersionInsert[]
+  snippetRows: SnippetInsert[]
+} {
+  const promptRows: PromptInsert[] = seed.prompts.map((p, i) => {
+    const d = seed.docs.get(p.id)!
+    return {
+      id: p.id,
+      name: p.name,
+      body: d.body,
+      regions: d.regions,
+      tokens: p.tokens,
+      current_version: p.currentVersion,
+      sort_order: i,
+    }
+  })
+  const versionRows: VersionInsert[] = seed.prompts.flatMap((p) =>
+    p.versions.map((v) => {
+      const d = seed.docs.get(v.id)!
+      return {
+        id: v.id,
+        prompt_id: p.id,
+        n: v.n,
+        message: v.message,
+        body: d.body,
+        regions: d.regions,
+        tokens: v.tokens,
+        saved_at: v.savedAt,
+      }
+    })
+  )
+  const snippetRows: SnippetInsert[] = seed.snippets.map((s, i) => {
+    const d = seed.docs.get(s.id)!
+    return {
+      id: s.id,
+      name: s.name,
+      body: d.body,
+      regions: d.regions,
+      tokens: s.tokens,
+      version: s.version,
+      used_by: s.usedBy,
+      stale: s.stale,
+      sort_order: i,
+    }
+  })
+  return { promptRows, versionRows, snippetRows }
+}
+
+/** Rebuild the in-memory library from Supabase rows. */
+function domainFromRows(
+  promptRows: PromptRow[],
+  versionRows: VersionRow[],
+  snippetRows: SnippetRow[]
+): LibraryData {
+  const docs = new Map<string, Doc>()
+  const prompts: Prompt[] = promptRows.map((pr) => {
+    const versions: PromptVersion[] = versionRows
+      .filter((v) => v.prompt_id === pr.id)
+      .sort((a, b) => b.n - a.n)
+      .map((v) => {
+        docs.set(v.id, {
+          id: v.id,
+          kind: "version",
+          title: `${pr.name} · v${v.n}`,
+          tokens: v.tokens,
+          readOnly: true,
+          body: v.body,
+          regions: v.regions,
+        })
+        return {
+          id: v.id,
+          promptId: pr.id,
+          n: v.n,
+          message: v.message,
+          savedAt: v.saved_at,
+          tokens: v.tokens,
+        }
+      })
+    docs.set(pr.id, {
+      id: pr.id,
+      kind: "prompt",
+      title: pr.name,
+      tokens: pr.tokens,
+      readOnly: false,
+      body: pr.body,
+      regions: pr.regions,
+    })
+    return {
+      id: pr.id,
+      name: pr.name,
+      tokens: pr.tokens,
+      currentVersion: pr.current_version,
+      versions,
+    }
+  })
+
+  const snippets: Snippet[] = snippetRows.map((sr) => {
+    docs.set(sr.id, {
+      id: sr.id,
+      kind: "snippet",
+      title: sr.name,
+      tokens: sr.tokens,
+      readOnly: false,
+      body: sr.body,
+      regions: sr.regions,
+    })
+    return {
+      id: sr.id,
+      name: sr.name,
+      tokens: sr.tokens,
+      version: sr.version,
+      usedBy: sr.used_by,
+      stale: sr.stale,
+    }
+  })
+
+  return { prompts, snippets, docs }
+}
+
+// ---- Reactive store ------------------------------------------------------
+
+type Status = "loading" | "ready"
+
+let prompts: Prompt[] = []
+let snippets: Snippet[] = []
+let docs = new Map<string, Doc>()
+let status: Status = "loading"
+/** Non-fatal message for the UI banner (offline fallback, or a failed save). */
+let error: string | null = null
+/** True only when the store is genuinely backed by a reachable Supabase DB —
+ *  i.e. we loaded real rows (or seeded a fresh one). Stays false when
+ *  unconfigured OR when a load error dropped us to in-memory seeds, so write-
+ *  through can never clobber rows we failed to read. */
+let persistent = false
+
+export interface LibrarySnapshot {
+  prompts: Prompt[]
+  snippets: Snippet[]
+  status: Status
+  error: string | null
+}
+
+// Cached so useSyncExternalStore sees a stable reference between changes.
+let snapshot: LibrarySnapshot = { prompts, snippets, status, error }
+const listeners = new Set<() => void>()
+
+function emit(): void {
+  snapshot = { prompts, snippets, status, error }
+  for (const listener of listeners) listener()
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
+function getSnapshot(): LibrarySnapshot {
+  return snapshot
+}
+
+/** Reactive view of the library. */
+export function useLibrary(): LibrarySnapshot {
+  return useSyncExternalStore(subscribe, getSnapshot)
+}
+
+function applyState(data: LibraryData, err: string | null): void {
+  prompts = data.prompts
+  snippets = data.snippets
+  docs = data.docs
+  status = "ready"
+  error = err
+  emit()
+}
+
+// ---- Hydration -----------------------------------------------------------
+
+let hydratePromise: Promise<void> | null = null
+
+/** Load the library once. Safe to call repeatedly (e.g. StrictMode). */
+export function hydrate(): Promise<void> {
+  if (!hydratePromise) hydratePromise = runHydrate()
+  return hydratePromise
+}
+
+async function runHydrate(): Promise<void> {
+  const seed = buildSeedData()
+  if (!supabase) {
+    // No backend configured: run purely in memory, no write-through.
+    applyState(seed, null)
+    return
+  }
+  try {
+    const data = await loadFromSupabase(seed)
+    // Only now is the store genuinely backed by a reachable DB, so edits may be
+    // written to it. Set before applyState so a sync subscriber sees it.
+    persistent = true
+    applyState(data, null)
+    // Flush the last debounced edit when the tab is hidden or closed.
+    // visibilitychange fires while the page is still alive (reliable on tab
+    // switch / mobile background); beforeunload is a weaker last resort whose
+    // fetch the browser may cancel mid-unload.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flushPending()
+    })
+    window.addEventListener("beforeunload", flushPending)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    console.warn("[library] Supabase unavailable — using in-memory seeds:", msg)
+    // persistent stays false: never write seed content back over rows we
+    // could not read.
+    applyState(
+      seed,
+      "Working from local sample data — couldn't reach Supabase. Edits won't be saved."
+    )
+  }
+}
+
+async function loadFromSupabase(seed: LibraryData): Promise<LibraryData> {
+  const sb = supabase!
+  const rows = await fetchAll(sb)
+  // Seed a fresh DB — and heal one left half-populated by an interrupted seed.
+  // Snippets are inserted last, so "snippets empty" (whatever else is present)
+  // means the seed never finished. No delete-all feature exists yet, so this
+  // can't misfire on a user who legitimately cleared their snippets.
+  const needsSeed = rows.promptRows.length === 0 || rows.snippetRows.length === 0
+  if (!needsSeed) {
+    return domainFromRows(rows.promptRows, rows.versionRows, rows.snippetRows)
+  }
+  await seedSupabase(seed)
+  // Re-read rather than returning the seed: on a heal the prompts table may
+  // already hold the user's edits, which the idempotent seed left untouched.
+  const seeded = await fetchAll(sb)
+  return domainFromRows(seeded.promptRows, seeded.versionRows, seeded.snippetRows)
+}
+
+async function fetchAll(sb: NonNullable<typeof supabase>): Promise<{
+  promptRows: PromptRow[]
+  versionRows: VersionRow[]
+  snippetRows: SnippetRow[]
+}> {
+  const [pRes, vRes, sRes] = await Promise.all([
+    sb.from("prompts").select("*").order("sort_order"),
+    sb.from("prompt_versions").select("*"),
+    sb.from("snippets").select("*").order("sort_order"),
+  ])
+  if (pRes.error) throw pRes.error
+  if (vRes.error) throw vRes.error
+  if (sRes.error) throw sRes.error
+  return {
+    promptRows: pRes.data ?? [],
+    versionRows: vRes.data ?? [],
+    snippetRows: sRes.data ?? [],
+  }
+}
+
+async function seedSupabase(seed: LibraryData): Promise<void> {
+  const sb = supabase!
+  const { promptRows, versionRows, snippetRows } = rowsFromSeed(seed)
+  // upsert + ignoreDuplicates so a retry after a partial seed fills the gaps
+  // without colliding on ids or overwriting existing (possibly edited) rows.
+  // Prompts first (versions FK → prompts).
+  const opts = { onConflict: "id", ignoreDuplicates: true }
+  const p = await sb.from("prompts").upsert(promptRows, opts)
+  if (p.error) throw p.error
+  if (versionRows.length) {
+    const v = await sb.from("prompt_versions").upsert(versionRows, opts)
+    if (v.error) throw v.error
+  }
+  const s = await sb.from("snippets").upsert(snippetRows, opts)
+  if (s.error) throw s.error
+}
+
+// ---- Reads ---------------------------------------------------------------
+
+export function getDoc(id: string): Doc | undefined {
+  return docs.get(id)
+}
+
+/** The doc to open on a fresh workspace. Valid after hydrate() resolves. */
+export function firstPromptId(): string | null {
+  return prompts[0]?.id ?? null
+}
+
+// ---- Writes (cache-through to Supabase) ----------------------------------
+
+interface PendingWrite {
+  kind: "prompt" | "snippet"
+  body: string
+  regions: Region[]
+  tokens: number
+}
+
+const pending = new Map<string, PendingWrite>()
+let flushTimer: ReturnType<typeof setTimeout> | null = null
+const FLUSH_DELAY_MS = 500
+const RETRY_DELAY_MS = 3000
+
+function scheduleFlush(delay: number = FLUSH_DELAY_MS): void {
+  if (flushTimer) clearTimeout(flushTimer)
+  flushTimer = setTimeout(flushPending, delay)
+}
+
+/** Push all pending edits to Supabase now (also fired on tab hide/close). */
+export function flushPending(): void {
+  if (flushTimer) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+  void runFlush()
+}
+
+async function runFlush(): Promise<void> {
+  if (!persistent || !supabase || pending.size === 0) return
+  const sb = supabase
+  const now = new Date().toISOString()
+  const writes = [...pending.entries()]
+  pending.clear()
+
+  const results = await Promise.all(
+    writes.map(async ([id, w]) => {
+      const patch = {
+        body: w.body,
+        regions: w.regions,
+        tokens: w.tokens,
+        updated_at: now,
+      }
+      // Branch on kind so the typed query builder keeps its per-table payload.
+      const res =
+        w.kind === "prompt"
+          ? await sb.from("prompts").update(patch).eq("id", id)
+          : await sb.from("snippets").update(patch).eq("id", id)
+      return { id, w, err: res.error }
+    })
+  )
+
+  const failed = results.filter((r) => r.err)
+  for (const r of failed) {
+    console.error(`[library] persist ${r.id} failed:`, r.err!.message)
+    // Re-queue unless a newer edit for this id arrived while we were writing.
+    if (!pending.has(r.id)) pending.set(r.id, r.w)
+  }
+
+  // Surface (or clear) a non-fatal save error on the same banner channel as
+  // hydrate. In persistent mode hydrate succeeded, so `error` was null.
+  const nextError =
+    failed.length > 0 ? "Some edits couldn't be saved — retrying…" : null
+  if (nextError !== error) {
+    error = nextError
+    emit()
+  }
+  if (failed.length > 0) scheduleFlush(RETRY_DELAY_MS)
+}
+
+/** Editor writeback: update the cache synchronously (so the editor and sidebar
+ *  stay live) and schedule a debounced persist. Read-only docs are ignored. */
 export function updateDocContent(
   id: string,
   body: string,
   regions: Region[]
 ): void {
-  const doc = DOCS.get(id)
+  const doc = docs.get(id)
   if (!doc || doc.readOnly) return
-  DOCS.set(id, { ...doc, body, regions, tokens: approxTokens(body) })
+  const tokens = approxTokens(body)
+  docs.set(id, { ...doc, body, regions, tokens })
+
+  // Keep the sidebar's token count in sync with the edit.
+  if (doc.kind === "prompt") {
+    prompts = prompts.map((p) => (p.id === id ? { ...p, tokens } : p))
+  } else if (doc.kind === "snippet") {
+    snippets = snippets.map((s) => (s.id === id ? { ...s, tokens } : s))
+  }
+  emit()
+
+  // Only write through when genuinely backed by Supabase (see `persistent`).
+  if (persistent && (doc.kind === "prompt" || doc.kind === "snippet")) {
+    pending.set(id, { kind: doc.kind, body, regions, tokens })
+    scheduleFlush()
+  }
 }

@@ -9,7 +9,7 @@ import {
 
 import { Button } from "@/components/ui/button"
 import { KindBadge } from "@/components/shell/editor-slot"
-import { fmtTokens, PROMPTS, SNIPPETS, type Prompt } from "@/lib/library"
+import { fmtTokens, useLibrary, type Prompt } from "@/lib/library"
 import { cn } from "@/lib/utils"
 
 interface LibrarySidebarProps {
@@ -188,6 +188,7 @@ export function LibrarySidebar({
   onOpenDoc,
   onOpenDocToSide,
 }: LibrarySidebarProps) {
+  const { prompts, snippets } = useLibrary()
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const rowProps = { activeDocId, openDocIds, onOpenDoc, onOpenDocToSide }
 
@@ -225,7 +226,7 @@ export function LibrarySidebar({
       </header>
       <nav className="min-h-0 flex-1 overflow-y-auto p-2">
         <SectionLabel>Prompts</SectionLabel>
-        {PROMPTS.map((prompt) => (
+        {prompts.map((prompt) => (
           <PromptItem
             key={prompt.id}
             prompt={prompt}
@@ -237,7 +238,7 @@ export function LibrarySidebar({
           />
         ))}
         <SectionLabel className="mt-4">Snippets</SectionLabel>
-        {SNIPPETS.map((snippet) => (
+        {snippets.map((snippet) => (
           <Row
             key={snippet.id}
             docId={snippet.id}

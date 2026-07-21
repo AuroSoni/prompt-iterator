@@ -14,7 +14,7 @@ import {
   WorkspaceWatermark,
   type SlotParams,
 } from "@/components/shell/editor-slot"
-import { getDoc, PROMPTS } from "@/lib/library"
+import { firstPromptId, getDoc } from "@/lib/library"
 
 /** The shell holds at most four generic editor slots (Phase 0 decision). */
 export const MAX_SLOTS = 4
@@ -156,9 +156,10 @@ export function Workspace({
         event.api.onDidActivePanelChange(sync),
       ]
       // Fresh workspace: open the first prompt so the shell never starts empty.
-      const first = PROMPTS[0]
+      // Valid here because the shell only mounts once the library is hydrated.
+      const first = firstPromptId()
       if (first && event.api.panels.length === 0) {
-        addSlot(event.api, "slot-1", first.id)
+        addSlot(event.api, "slot-1", first)
       }
       sync()
     },

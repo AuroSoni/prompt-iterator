@@ -102,6 +102,47 @@ You then accept or ignore the update per prompt. No spooky action at a distance.
 
 ---
 
+## Running it locally
+
+```bash
+npm install
+npm run dev      # Vite dev server with HMR
+npm run build    # tsc -b (typecheck) then vite build
+npm run lint     # oxlint
+```
+
+### Storage (optional)
+
+The app runs with **no backend** out of the box: if Supabase isn't configured it
+loads the built-in sample library and keeps edits in memory (a browser refresh
+resets them). That keeps this public repo clone-and-run.
+
+To persist to Supabase:
+
+1. Create a Supabase project (or reuse one).
+2. Apply the schema in [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql)
+   — via `supabase db push`, or by pasting it into the SQL editor.
+3. Copy `.env.example` to `.env.local` and fill in:
+
+   ```
+   VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+   VITE_SUPABASE_ANON_KEY=<publishable anon key>
+   ```
+
+On first run against an empty database the app seeds it with the sample library;
+after that it loads from and writes back to Supabase (edits persist on a short
+debounce). If the project is ever unreachable, the app falls back to sample data
+and shows a banner rather than failing.
+
+**Security.** This is a **public repo** and a **single-user** tool. Only the
+publishable anon key ever appears in client code — never a service-role key or
+access token. Row Level Security is on; the shipped policies grant the anon role
+full access because the anon key + project URL (kept in the git-ignored
+`.env.local`) are the only gate. To make the data properly private, add Supabase
+Auth and tighten the policies as noted in the migration.
+
+---
+
 ## Design & build phases
 
 ### Phase 0 — Design decisions (before any feature code)
