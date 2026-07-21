@@ -1,18 +1,40 @@
-import { Button } from "@/components/ui/button"
+import { useCallback, useRef, useState } from "react"
+
+import { LibrarySidebar } from "@/components/shell/library-sidebar"
+import { Workspace, type WorkspaceHandle } from "@/components/shell/workspace"
 
 function App() {
+  const workspaceRef = useRef<WorkspaceHandle>(null)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [openDocIds, setOpenDocIds] = useState<string[]>([])
+  const [activeDocId, setActiveDocId] = useState<string | null>(null)
+
+  const handleOpenDocsChange = useCallback(
+    (ids: string[]) => setOpenDocIds(ids),
+    []
+  )
+  const handleActiveDocChange = useCallback(
+    (id: string | null) => setActiveDocId(id),
+    []
+  )
+
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center gap-6 p-8">
-      <div className="flex flex-col items-center gap-2 text-center">
-        <h1 className="text-4xl font-semibold tracking-tight">prompt-iterator</h1>
-        <p className="text-muted-foreground">
-          Vite + React + Tailwind CSS v4 + shadcn/ui
-        </p>
-      </div>
-      <div className="flex gap-3">
-        <Button>Get started</Button>
-        <Button variant="outline">Documentation</Button>
-      </div>
+    <div className="flex h-svh overflow-hidden">
+      <LibrarySidebar
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
+        activeDocId={activeDocId}
+        openDocIds={openDocIds}
+        onOpenDoc={(id) => workspaceRef.current?.openDoc(id)}
+        onOpenDocToSide={(id) => workspaceRef.current?.openDocToSide(id)}
+      />
+      <main className="min-w-0 flex-1">
+        <Workspace
+          ref={workspaceRef}
+          onOpenDocsChange={handleOpenDocsChange}
+          onActiveDocChange={handleActiveDocChange}
+        />
+      </main>
     </div>
   )
 }

@@ -128,3 +128,27 @@
     @apply font-sans;
     }
 }
+
+/* Dockview workspace — bridge the app's design tokens into dockview's theme
+   variables so panes follow light/dark mode automatically. */
+.workspace-dockview {
+    --dv-group-view-background-color: var(--card);
+    --dv-tabs-and-actions-container-background-color: var(--muted);
+    --dv-tabs-and-actions-container-height: 34px;
+    --dv-tabs-and-actions-container-font-size: 12px;
+    --dv-activegroup-visiblepanel-tab-background-color: var(--card);
+    --dv-activegroup-hiddenpanel-tab-background-color: transparent;
+    --dv-inactivegroup-visiblepanel-tab-background-color: color-mix(in oklch, var(--card) 60%, var(--muted));
+    --dv-inactivegroup-hiddenpanel-tab-background-color: transparent;
+    --dv-activegroup-visiblepanel-tab-color: var(--foreground);
+    --dv-activegroup-hiddenpanel-tab-color: var(--muted-foreground);
+    --dv-inactivegroup-visiblepanel-tab-color: var(--muted-foreground);
+    --dv-inactivegroup-hiddenpanel-tab-color: var(--muted-foreground);
+    --dv-tab-divider-color: var(--border);
+    --dv-separator-border: var(--border);
+    --dv-active-sash-color: var(--ring);
+    --dv-drag-over-background-color: color-mix(in oklch, var(--primary) 10%, transparent);
+    --dv-drag-over-border-color: var(--ring);
+    --dv-scrollbar-background-color: var(--border);
+    --dv-icon-hover-background-color: var(--muted);
+}
