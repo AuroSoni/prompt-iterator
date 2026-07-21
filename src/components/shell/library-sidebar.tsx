@@ -1,7 +1,9 @@
 import { useRef, useState } from "react"
 import type { ReactNode } from "react"
 import {
+  BookmarkPlus,
   ChevronRight,
+  Import,
   LogOut,
   MoreHorizontal,
   PanelLeftClose,
@@ -46,6 +48,11 @@ interface LibrarySidebarProps {
   onCreateSnippet: () => Promise<string | null>
   onRenameDoc: (docId: string, name: string) => void
   onDeleteDoc: (docId: string) => void
+  /** Insert a snippet's text at the cursor of the active prompt (as a linked
+   *  region). Reports an error if there's no editable prompt focused. */
+  onInsertSnippet: (snippetId: string) => void
+  /** Pin a mark-created snippet into the library list. */
+  onPromoteSnippet: (snippetId: string) => void
   /** Present only when Supabase is configured (there's a session to end). */
   onSignOut?: () => void
 }
@@ -130,9 +137,12 @@ function Row({
 function RowMenu({
   onRename,
   onDelete,
+  extra,
 }: {
   onRename: () => void
   onDelete: () => void
+  /** Type-specific items rendered above Rename (e.g. snippet insert/promote). */
+  extra?: ReactNode
 }) {
   return (
     <DropdownMenu>
@@ -148,6 +158,7 @@ function RowMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
+        {extra}
         <DropdownMenuItem onSelect={() => setTimeout(onRename, 0)}>
           <Pencil />
           Rename
@@ -361,6 +372,8 @@ export function LibrarySidebar({
   onCreateSnippet,
   onRenameDoc,
   onDeleteDoc,
+  onInsertSnippet,
+  onPromoteSnippet,
   onSignOut,
 }: LibrarySidebarProps) {
   const { prompts, snippets } = useLibrary()
@@ -445,7 +458,17 @@ export function LibrarySidebar({
         >
           Snippets
         </SectionHeader>
-        {snippets.map((snippet) =>
+        {/* Library shows only SHARED snippets: authored/promoted (library=true)
+            or referenced by 2+ regions. One-off, mark-created snippets stay
+            hidden until reused. */}
+        {snippets.filter((s) => s.library || s.usedBy >= 2).length === 0 && (
+          <p className="px-2 py-1 text-[12px] leading-relaxed text-muted-foreground">
+            No shared snippets yet. Mark a region in a prompt, then reuse it.
+          </p>
+        )}
+        {snippets
+          .filter((s) => s.library || s.usedBy >= 2)
+          .map((snippet) =>
           editingId === snippet.id ? (
             <InlineRenameRow
               key={snippet.id}
@@ -464,6 +487,28 @@ export function LibrarySidebar({
               onOpenToSide={onOpenDocToSide}
               actions={
                 <RowMenu
+                  extra={
+                    <>
+                      <DropdownMenuItem
+                        onSelect={() =>
+                          setTimeout(() => onInsertSnippet(snippet.id), 0)
+                        }
+                      >
+                        <Import />
+                        Insert into active prompt
+                      </DropdownMenuItem>
+                      {!snippet.library && (
+                        <DropdownMenuItem
+                          onSelect={() =>
+                            setTimeout(() => onPromoteSnippet(snippet.id), 0)
+                          }
+                        >
+                          <BookmarkPlus />
+                          Add to library
+                        </DropdownMenuItem>
+                      )}
+                    </>
+                  }
                   onRename={() => setEditingId(snippet.id)}
                   onDelete={() =>
                     setDeleteTarget({
@@ -519,7 +564,7 @@ export function LibrarySidebar({
             <AlertDialogDescription>
               {deleteTarget?.kind === "prompt"
                 ? "This permanently deletes the prompt and its saved version history. This can't be undone."
-                : "This permanently deletes the snippet. This can't be undone."}
+                : "This removes the snippet from the library. Prompts that used it keep their copied text — they just stop tracking it. This can't be undone."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

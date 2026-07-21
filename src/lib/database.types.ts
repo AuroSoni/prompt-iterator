@@ -66,6 +66,9 @@ interface SnippetsTable {
     version: number
     used_by: number
     stale: number
+    /** True for snippets shown in the library list (authored/promoted). See
+     *  supabase/migrations/0004_snippet_library.sql. */
+    library: boolean
     sort_order: number
     updated_at: string
   }
@@ -78,6 +81,7 @@ interface SnippetsTable {
     version?: number
     used_by?: number
     stale?: number
+    library?: boolean
     sort_order?: number
     updated_at?: string
   }
