@@ -27,25 +27,37 @@ being up.
 
 ## Core model
 
-**A prompt is a continuous document with named regions painted over spans of it.**
+**A prompt is a continuous document with named regions painted over spans of it —
+and every region is a snippet.**
 
 Not a stack of blocks. You write prose freely; regions are an annotation layer on
-top, so text can exist outside any region and regions can be ragged.
+top, so text can exist outside any region and regions can be ragged. Marking a
+span promotes it: a region *is* a reference to a snippet, and the snippet holds the
+canonical text.
 
 - **Prompt** — a document, versioned as a whole
-- **Region** — a named, marked span within a prompt
-- **Snippet** — a region promoted into the shared library, versioned independently
+- **Region** — a named, marked span within a prompt; it references a **snippet**
+- **Snippet** — the canonical, independently-versioned text a region is an
+  occurrence of. Marking a span creates one; marking (or inserting) the same text
+  elsewhere links back to the same snippet
 - **Version** — an immutable snapshot of a whole prompt
 
-### Snippet reuse: copy-on-insert
+The **library** lists only *shared* snippets — those used in two or more places, or
+ones you explicitly keep. One-off regions stay out of the way. Regions are flat:
+marking inside a snippet is a plain local annotation, not a nested sub-snippet (v1).
 
-Inserting a snippet copies its text into the prompt and records which snippet
-version it came from. Editing the snippet in the library does **not** silently
-mutate prompts that use it. Instead the tool surfaces staleness:
+### Snippet reuse: copy + staleness
 
-> `output-format` has changed since 3 prompts inserted it — review
+A region keeps its **own editable copy** of the snippet's text, so editing a
+snippet elsewhere never silently rewrites a prompt. Instead each region tracks the
+snippet **version** it last synced to, and the tool surfaces drift:
 
-You then accept or ignore the update per prompt. No spooky action at a distance.
+> `output-format` has changed since it was used here — pull the update
+
+You **pull** (take the snippet's current text into the region) or **push** (make
+your edited region text the snippet's next version) per region. Usage and staleness
+counts are derived from these real links, not guessed. No spooky action at a
+distance.
 
 ---
 
@@ -54,11 +66,12 @@ You then accept or ignore the update per prompt. No spooky action at a distance.
 ### Editor
 
 - Continuous long-form text editor, comfortable for multi-thousand-token documents
-- Select a span → mark it as a named region
+- Select a span → mark it as a named region; marking creates (or links to) a snippet
 - Regions carry a **note** (why this exists / what it's for)
 - Regions carry a **flag**: `ok` / `suspect` / `stale` / `revisit`
-- Promote a region to a library snippet
-- Insert a snippet from the library at the cursor
+- Insert a snippet from the library at the cursor (as a linked region)
+- **Pull** a snippet's current text into a region, or **push** a region's edits back
+  up to the snippet
 - Flat regions only — no nesting in v1
 
 ### Comprehension aids
@@ -79,8 +92,9 @@ You then accept or ignore the update per prompt. No spooky action at a distance.
 
 ### Snippet library
 
-- Browse, search, edit, and version snippets
-- For each snippet: which prompts currently use it, and which of them are stale
+- Browse, edit, and version snippets
+- For each snippet: how many places use it, and how many are stale — derived from
+  the real region links, not stored counters
 
 ### Export
 
