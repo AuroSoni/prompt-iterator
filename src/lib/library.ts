@@ -48,10 +48,14 @@ export interface Snippet {
   name: string
   tokens: number
   version: number
-  /** How many prompts have inserted this snippet (copy-on-insert links). */
+  /** DERIVED: how many prompt regions reference this snippet (recomputeUsage). */
   usedBy: number
-  /** How many of those prompts hold an older snippet version than current. */
+  /** DERIVED: how many of those regions are behind the snippet's version. */
   stale: number
+  /** True for snippets shown in the library list — authored via "New snippet" or
+   *  promoted. Mark-created snippets start false and surface only once used by
+   *  2+ regions (see the sidebar's `library || usedBy >= 2` filter). */
+  library: boolean
   /** Stable list position; also the basis for a new snippet's sort_order. */
   sortOrder: number
 }
@@ -145,6 +149,10 @@ Match the user's register: if they write tersely, be terse. If they are visibly 
       name: "output-format",
       flag: "stale",
       note: "Response schema v3 shipped 2026-06; the field names below still show v2.",
+      // Linked to the `output-format` library snippet (s1, v4) at an older
+      // version, so this region shows stale with an available pull out of the box.
+      snippetId: "s1",
+      syncedVersion: 3,
     },
     text: `## Output format
 
@@ -432,6 +440,7 @@ function buildSeedData(): LibraryData {
       version: seed.version,
       usedBy: seed.usedBy,
       stale: seed.stale,
+      library: true,
       sortOrder: i,
     }
   })
@@ -564,6 +573,7 @@ function domainFromRows(
       version: sr.version,
       usedBy: sr.used_by,
       stale: sr.stale,
+      library: sr.library,
       sortOrder: sr.sort_order,
     }
   })
@@ -578,6 +588,10 @@ type Status = "loading" | "ready"
 let prompts: Prompt[] = []
 let snippets: Snippet[] = []
 let docs = new Map<string, Doc>()
+/** Last-known canonical body per snippet id: the baseline the flush diff bumps
+ *  `version` against, and the source of truth `getSnippetBody` returns. Seeded on
+ *  hydrate, updated on create/push and on a settled snippet-body flush. */
+const canonicalBody = new Map<string, string>()
 let status: Status = "loading"
 /** Non-fatal message for the UI banner (offline fallback, or a failed save). */
 let error: string | null = null
@@ -626,9 +640,59 @@ function applyState(data: LibraryData, err: string | null): void {
   prompts = data.prompts
   snippets = data.snippets
   docs = data.docs
+  // Seed the canonical-body baseline from loaded snippet bodies, then derive
+  // usedBy/stale from the loaded regions (overwriting any stored/seed counters).
+  canonicalBody.clear()
+  for (const s of data.snippets) {
+    const d = data.docs.get(s.id)
+    if (d) canonicalBody.set(s.id, d.body)
+  }
+  recomputeUsage()
   status = "ready"
   error = err
   emit()
+}
+
+/** Signature of a doc's snippet links — the set of (snippetId, syncedVersion)
+ *  pairs. Used to skip the usage rescan on edits that don't touch any link. */
+function linkSig(regions: Region[]): string {
+  return regions
+    .filter((r) => r.snippetId)
+    .map((r) => `${r.snippetId}:${r.syncedVersion ?? 0}`)
+    .sort()
+    .join(",")
+}
+
+/** Recompute derived snippet usedBy/stale from live prompt regions (unification:
+ *  region→snippet references ARE the usage links). Scans only `kind==="prompt"`
+ *  docs — snippet-internal regions are unlinked in flat v1, and version
+ *  snapshots are frozen history that must not inflate the counts. Mutates
+ *  `snippets` in place; returns whether anything changed. Callers emit(). */
+function recomputeUsage(): boolean {
+  const byId = new Map(snippets.map((s) => [s.id, s]))
+  const used = new Map<string, number>()
+  const stale = new Map<string, number>()
+  for (const doc of docs.values()) {
+    if (doc.kind !== "prompt") continue
+    for (const r of doc.regions) {
+      if (!r.snippetId) continue
+      used.set(r.snippetId, (used.get(r.snippetId) ?? 0) + 1)
+      const snip = byId.get(r.snippetId)
+      if (snip && (r.syncedVersion ?? 0) < snip.version) {
+        stale.set(r.snippetId, (stale.get(r.snippetId) ?? 0) + 1)
+      }
+    }
+  }
+  let changed = false
+  const next = snippets.map((s) => {
+    const u = used.get(s.id) ?? 0
+    const st = stale.get(s.id) ?? 0
+    if (u === s.usedBy && st === s.stale) return s
+    changed = true
+    return { ...s, usedBy: u, stale: st }
+  })
+  if (changed) snippets = next
+  return changed
 }
 
 // ---- Hydration -----------------------------------------------------------
@@ -758,6 +822,18 @@ export function getDoc(id: string): Doc | undefined {
   return docs.get(id)
 }
 
+/** Look up a snippet by id. Returns undefined for an unlinked/dangling id — a
+ *  region whose snippet was deleted keeps its (copied) text and is treated as a
+ *  plain local region. Consumers must tolerate undefined. */
+export function getSnippet(id: string): Snippet | undefined {
+  return snippets.find((s) => s.id === id)
+}
+
+/** The snippet's canonical body — what a pull/insert copies in. */
+export function getSnippetBody(id: string): string | undefined {
+  return canonicalBody.get(id) ?? docs.get(id)?.body
+}
+
 /** The doc to open on a fresh workspace. Valid after hydrate() resolves. */
 export function firstPromptId(): string | null {
   return prompts[0]?.id ?? null
@@ -800,20 +876,45 @@ async function runFlush(): Promise<void> {
 
   const results = await Promise.all(
     writes.map(async ([id, w]) => {
-      const patch = {
+      const base = {
         body: w.body,
         regions: w.regions,
         tokens: w.tokens,
         updated_at: now,
       }
       // Branch on kind so the typed query builder keeps its per-table payload.
-      const res =
-        w.kind === "prompt"
-          ? await sb.from("prompts").update(patch).eq("id", id)
-          : await sb.from("snippets").update(patch).eq("id", id)
-      return { id, w, err: res.error }
+      if (w.kind === "prompt") {
+        const res = await sb.from("prompts").update(base).eq("id", id)
+        return { id, w, err: res.error, bumpTo: undefined as number | undefined }
+      }
+      // A snippet whose canonical body changed since the last flush advances its
+      // version, so referencing regions can detect staleness. The debounce
+      // coalesces a typing burst into one bump; region-only edits don't bump.
+      let bumpTo: number | undefined
+      if (canonicalBody.get(id) !== w.body) {
+        bumpTo = (snippets.find((s) => s.id === id)?.version ?? 0) + 1
+      }
+      const res = await sb
+        .from("snippets")
+        .update(bumpTo !== undefined ? { ...base, version: bumpTo } : base)
+        .eq("id", id)
+      return { id, w, err: res.error, bumpTo }
     })
   )
+
+  // Commit version bumps only for writes that actually persisted, so a failed
+  // (and re-queued) snippet write still bumps on its retry.
+  let bumped = false
+  for (const r of results) {
+    if (!r.err && r.bumpTo !== undefined) {
+      canonicalBody.set(r.id, r.w.body)
+      snippets = snippets.map((s) =>
+        s.id === r.id ? { ...s, version: r.bumpTo! } : s
+      )
+      bumped = true
+    }
+  }
+  if (bumped) recomputeUsage()
 
   const failed = results.filter((r) => r.err)
   for (const r of failed) {
@@ -826,7 +927,7 @@ async function runFlush(): Promise<void> {
   // hydrate. In persistent mode hydrate succeeded, so `error` was null.
   const nextError =
     failed.length > 0 ? "Some edits couldn't be saved — retrying…" : null
-  if (nextError !== error) {
+  if (nextError !== error || bumped) {
     error = nextError
     emit()
   }
@@ -843,6 +944,10 @@ export function updateDocContent(
   const doc = docs.get(id)
   if (!doc || doc.readOnly) return
   const tokens = approxTokens(body)
+  // Only rescan usage when a prompt edit actually changed its snippet links
+  // (mark, pull, or a region drop) — not on every keystroke.
+  const linkChanged =
+    doc.kind === "prompt" && linkSig(doc.regions) !== linkSig(regions)
   docs.set(id, { ...doc, body, regions, tokens })
 
   // Keep the sidebar's token count in sync with the edit.
@@ -851,6 +956,7 @@ export function updateDocContent(
   } else if (doc.kind === "snippet") {
     snippets = snippets.map((s) => (s.id === id ? { ...s, tokens } : s))
   }
+  if (linkChanged) recomputeUsage()
   emit()
 
   // Only write through when genuinely backed by Supabase (see `persistent`).
@@ -935,12 +1041,108 @@ export async function createSnippet(name: string): Promise<string> {
     body: "",
     regions: [],
   })
+  canonicalBody.set(id, "")
   snippets = [
     ...snippets,
-    { id, name, tokens, version: 1, usedBy: 0, stale: 0, sortOrder },
+    { id, name, tokens, version: 1, usedBy: 0, stale: 0, library: true, sortOrder },
   ]
   emit()
   return id
+}
+
+/** Create (or link to) a snippet whose canonical body IS `text` — the write path
+ *  behind marking a region and inserting. Unification: marking a span promotes it
+ *  to a snippet automatically. **Dedup:** if a snippet already has this exact
+ *  canonical body, link to it (so usedBy climbs to ≥2 and it enters the library)
+ *  instead of inserting a duplicate. Await-first (mirrors createPrompt), so the
+ *  INSERT lands before any debounced region UPDATE. A mark-created snippet is
+ *  `library:false` and surfaces only once referenced by 2+ regions. */
+export async function createSnippetFromText(
+  name: string,
+  text: string
+): Promise<{ id: string; version: number }> {
+  const existing = snippets.find((s) => canonicalBody.get(s.id) === text)
+  if (existing) return { id: existing.id, version: existing.version }
+
+  const id = `s_${crypto.randomUUID()}`
+  const sortOrder = nextSortOrder(snippets)
+  const tokens = approxTokens(text)
+  if (persistent && supabase) {
+    const { error: e } = await supabase.from("snippets").insert({
+      id,
+      name,
+      body: text,
+      regions: [],
+      tokens,
+      version: 1,
+      used_by: 0,
+      stale: 0,
+      library: false,
+      sort_order: sortOrder,
+    })
+    if (e) throw e
+  }
+  docs.set(id, {
+    id,
+    kind: "snippet",
+    title: name,
+    tokens,
+    readOnly: false,
+    body: text,
+    regions: [],
+  })
+  canonicalBody.set(id, text)
+  snippets = [
+    ...snippets,
+    { id, name, tokens, version: 1, usedBy: 0, stale: 0, library: false, sortOrder },
+  ]
+  emit()
+  return { id, version: 1 }
+}
+
+/** Surface a mark-created snippet in the library list regardless of usage. */
+export async function promoteSnippet(id: string): Promise<void> {
+  const snip = snippets.find((s) => s.id === id)
+  if (!snip || snip.library) return
+  if (persistent && supabase) {
+    const { error: e } = await supabase
+      .from("snippets")
+      .update({ library: true })
+      .eq("id", id)
+    if (e) throw e
+  }
+  snippets = snippets.map((s) => (s.id === id ? { ...s, library: true } : s))
+  emit()
+}
+
+/** Push a region's local edits up to its snippet: the snippet's canonical body
+ *  becomes `text` and its version advances, so OTHER regions referencing it go
+ *  stale. The caller should then sync its own region to the returned version.
+ *  Works in memory too (unlike the passive flush-time bump). */
+export async function updateSnippetFromRegion(
+  snippetId: string,
+  text: string
+): Promise<number> {
+  const snip = snippets.find((s) => s.id === snippetId)
+  if (!snip) throw new Error("That snippet no longer exists.")
+  const nextVersion = snip.version + 1
+  const tokens = approxTokens(text)
+  if (persistent && supabase) {
+    const { error: e } = await supabase
+      .from("snippets")
+      .update({ body: text, tokens, version: nextVersion })
+      .eq("id", snippetId)
+    if (e) throw e
+  }
+  const d = docs.get(snippetId)
+  if (d) docs.set(snippetId, { ...d, body: text, tokens })
+  canonicalBody.set(snippetId, text)
+  snippets = snippets.map((s) =>
+    s.id === snippetId ? { ...s, version: nextVersion, tokens } : s
+  )
+  recomputeUsage()
+  emit()
+  return nextVersion
 }
 
 /** Rename a prompt or snippet. No-ops on empty/unchanged names and version docs. */
@@ -991,9 +1193,16 @@ export async function deleteDoc(id: string): Promise<string[]> {
     }
     prompts = prompts.filter((p) => p.id !== id)
   } else {
+    // Delete = UNLINK: prompts keep their copied region text; any region whose
+    // snippetId now dangles is treated as a plain local region (getSnippet →
+    // undefined). No prompt text is lost (copy semantics, no FK).
     snippets = snippets.filter((s) => s.id !== id)
+    canonicalBody.delete(id)
   }
   docs.delete(id)
+  // Deleting a prompt drops its regions' references (usedBy falls); deleting a
+  // snippet removes its own counts. Either way, re-derive.
+  recomputeUsage()
   emit()
   return removed
 }
@@ -1026,6 +1235,7 @@ export function resetLibrary(): void {
     flushTimer = null
   }
   pending.clear()
+  canonicalBody.clear()
   prompts = []
   snippets = []
   docs = new Map()
