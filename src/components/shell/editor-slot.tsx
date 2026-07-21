@@ -2,9 +2,10 @@ import type {
   IDockviewPanelHeaderProps,
   IDockviewPanelProps,
 } from "dockview-react"
-import { Lock, X } from "lucide-react"
+import { X } from "lucide-react"
 
-import { fmtTokens, getDoc, type DocKind } from "@/lib/library"
+import { PromptEditor } from "@/components/editor/prompt-editor"
+import { getDoc, type DocKind } from "@/lib/library"
 import { cn } from "@/lib/utils"
 
 /** Params carried by every generic editor slot — the doc it displays. */
@@ -63,32 +64,9 @@ export function EditorSlotPanel({ params }: IDockviewPanelProps<SlotParams>) {
     )
   }
 
-  return (
-    <div className="flex h-full flex-col overflow-hidden bg-card text-card-foreground">
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b px-3 text-xs text-muted-foreground">
-        <KindBadge kind={doc.kind} />
-        <span className="truncate font-medium text-foreground">{doc.title}</span>
-        {doc.readOnly && (
-          <span className="inline-flex shrink-0 items-center gap-1">
-            <Lock className="size-3" />
-            read-only
-          </span>
-        )}
-        <span className="ml-auto shrink-0 tabular-nums">
-          {fmtTokens(doc.tokens)} tok
-        </span>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-        <div className="mx-auto max-w-prose text-sm leading-6 whitespace-pre-wrap">
-          {doc.body}
-        </div>
-      </div>
-      <div className="shrink-0 border-t border-dashed px-3 py-1.5 text-[11px] text-muted-foreground">
-        Placeholder slot — the CodeMirror 6 editor (Cockpit / Zen) mounts here
-        in Phase 1 core editing.
-      </div>
-    </div>
-  )
+  // Key by doc id: switching the doc a slot carries remounts a fresh editor
+  // (edits survive in the in-memory store via updateDocContent writeback).
+  return <PromptEditor key={doc.id} docId={doc.id} />
 }
 
 /** Custom tab: kind badge + title + close, so slots read at a glance. */

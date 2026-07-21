@@ -2,12 +2,14 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif;
+    --font-mono: 'Geist Mono Variable', ui-monospace, monospace;
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -152,3 +154,81 @@
     --dv-scrollbar-background-color: var(--border);
     --dv-icon-hover-background-color: var(--muted);
 }
+
+/* Prompt editor (CM6) — the Cockpit chrome mapped onto the app's tokens.
+   Flag colors are Tailwind palette values (emerald/amber/red/violet), pinned
+   here because the editor references them from plain CSS, not utilities. */
+.prompt-editor {
+    --flag-ok: oklch(0.596 0.145 163.225);      /* emerald-600 */
+    --flag-suspect: oklch(0.666 0.179 58.318);  /* amber-600 */
+    --flag-stale: oklch(0.577 0.245 27.325);    /* red-600 */
+    --flag-revisit: oklch(0.541 0.281 293.009); /* violet-600 */
+    --md-heading: oklch(0.5 0.134 242.749);     /* sky-700 */
+    --md-var: oklch(0.491 0.27 292.581);        /* violet-700 */
+    --md-code: oklch(0.555 0.163 48.998);       /* amber-700 */
+}
+.dark .prompt-editor {
+    --flag-ok: oklch(0.765 0.177 163.223);      /* emerald-400 */
+    --flag-suspect: oklch(0.828 0.189 84.429);  /* amber-400 */
+    --flag-stale: oklch(0.704 0.191 22.216);    /* red-400 */
+    --flag-revisit: oklch(0.702 0.183 293.541); /* violet-400 */
+    --md-heading: oklch(0.746 0.16 232.661);    /* sky-400 */
+    --md-var: oklch(0.702 0.183 293.541);       /* violet-400 */
+    --md-code: oklch(0.828 0.189 84.429);       /* amber-400 */
+}
+
+.prompt-editor .cm-editor {
+    height: 100%;
+    outline: none;
+    background: transparent;
+}
+.prompt-editor .cm-scroller {
+    font-family: 'Geist Mono Variable', ui-monospace, monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    overflow-y: auto;
+}
+.prompt-editor .cm-content {
+    padding: 18px 28px 35vh 10px;
+    caret-color: var(--primary);
+}
+.prompt-editor .cm-gutters {
+    background: var(--card);
+    color: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
+    border-right: 1px solid var(--border);
+    padding-right: 4px;
+}
+.prompt-editor .cm-activeLine {
+    background: color-mix(in oklch, var(--foreground) 4%, transparent);
+}
+.prompt-editor .cm-activeLineGutter {
+    background: transparent;
+    color: var(--muted-foreground);
+}
+.prompt-editor ::selection {
+    background: color-mix(in oklch, var(--primary) 18%, transparent);
+}
+
+.prompt-editor .pi-md-heading { color: var(--md-heading); font-weight: 700; }
+.prompt-editor .pi-md-bold { font-weight: 700; }
+.prompt-editor .pi-md-var { color: var(--md-var); }
+.prompt-editor .pi-md-code { color: var(--md-code); }
+
+.prompt-editor .pi-flag-ok      { background: color-mix(in oklch, var(--flag-ok) 6%, transparent); }
+.prompt-editor .pi-flag-suspect { background: color-mix(in oklch, var(--flag-suspect) 10%, transparent); }
+.prompt-editor .pi-flag-stale   { background: color-mix(in oklch, var(--flag-stale) 10%, transparent); }
+.prompt-editor .pi-flag-revisit { background: color-mix(in oklch, var(--flag-revisit) 10%, transparent); }
+
+/* Region name tag rendered above each region's first line. */
+.prompt-editor .pi-region-startline::before {
+    content: "── " attr(data-rname) " ";
+    display: block;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    padding: 12px 0 2px;
+    color: var(--muted-foreground);
+}
+.prompt-editor .pi-startline-ok::before      { color: var(--flag-ok); opacity: 0.8; }
+.prompt-editor .pi-startline-suspect::before { color: var(--flag-suspect); }
+.prompt-editor .pi-startline-stale::before   { color: var(--flag-stale); }
+.prompt-editor .pi-startline-revisit::before { color: var(--flag-revisit); }
