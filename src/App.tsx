@@ -5,9 +5,19 @@ import { Workspace, type WorkspaceHandle } from "@/components/shell/workspace"
 import { LoginScreen } from "@/components/auth/login-screen"
 import { initAuth, signOut, useAuth } from "@/lib/auth"
 import {
+  addRegionEffect,
+  getView,
+  regionsField,
+  regionsOverlap,
+} from "@/lib/editor"
+import {
   createPrompt,
   createSnippet,
   deleteDoc,
+  getDoc,
+  getSnippet,
+  getSnippetBody,
+  promoteSnippet,
   renameDoc,
   reportError,
   useLibrary,
@@ -79,6 +89,57 @@ function App() {
     }
   }, [])
 
+  // Insert a snippet's canonical text at the active prompt's cursor, as a linked
+  // region. Uses the editor-view registry to reach the doc the user is looking
+  // at (the sidebar only knows ids). Guards: needs an editable prompt focused,
+  // and won't drop a linked region inside an existing one (overlap).
+  const handleInsertSnippet = useCallback(
+    (snippetId: string) => {
+      if (!activeDocId) {
+        reportError("Open a prompt and place your cursor to insert a snippet.")
+        return
+      }
+      const target = getDoc(activeDocId)
+      if (!target || target.kind !== "prompt" || target.readOnly) {
+        reportError("Insert into a prompt — open one and click where it goes.")
+        return
+      }
+      const view = getView(activeDocId)
+      const snip = getSnippet(snippetId)
+      const body = getSnippetBody(snippetId)
+      if (!view || !snip || !body) return
+      const pos = view.state.selection.main.head
+      if (regionsOverlap(view.state.field(regionsField), pos, pos)) {
+        reportError("Move the cursor outside an existing region to insert.")
+        return
+      }
+      view.dispatch({
+        changes: { from: pos, insert: body },
+        effects: addRegionEffect.of({
+          id: `r${Date.now().toString(36)}`,
+          name: snip.name,
+          flag: "ok",
+          note: "",
+          from: pos,
+          to: pos + body.length,
+          snippetId,
+          syncedVersion: snip.version,
+        }),
+        selection: { anchor: pos + body.length },
+      })
+      view.focus()
+    },
+    [activeDocId]
+  )
+
+  const handlePromoteSnippet = useCallback(async (snippetId: string) => {
+    try {
+      await promoteSnippet(snippetId)
+    } catch (e) {
+      reportError(e instanceof Error ? e.message : "Couldn't promote the snippet.")
+    }
+  }, [])
+
   const handleSignOut = useCallback(() => {
     void signOut()
   }, [])
@@ -122,6 +183,8 @@ function App() {
           onCreateSnippet={handleCreateSnippet}
           onRenameDoc={handleRenameDoc}
           onDeleteDoc={handleDeleteDoc}
+          onInsertSnippet={handleInsertSnippet}
+          onPromoteSnippet={handlePromoteSnippet}
           onSignOut={isSupabaseConfigured ? handleSignOut : undefined}
         />
         <main className="min-w-0 flex-1">
