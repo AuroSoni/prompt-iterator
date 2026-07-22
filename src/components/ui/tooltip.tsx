@@ -34,10 +34,15 @@ function TooltipContent({
   className,
   sideOffset = 0,
   children,
+  container,
   ...props
-}: React.ComponentProps<typeof TooltipPrimitive.Content>) {
+}: React.ComponentProps<typeof TooltipPrimitive.Content> & {
+  /** Portal target. The editor passes its own container so scoped CSS vars
+   *  (e.g. .prompt-editor's --flag-*) and the .dark class still apply. */
+  container?: React.ComponentProps<typeof TooltipPrimitive.Portal>["container"]
+}) {
   return (
-    <TooltipPrimitive.Portal>
+    <TooltipPrimitive.Portal container={container}>
       <TooltipPrimitive.Content
         data-slot="tooltip-content"
         sideOffset={sideOffset}

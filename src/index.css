@@ -278,6 +278,63 @@
     color: var(--background);
 }
 
+/* Region hover card (CM hoverTooltip — renders inside the editor, so the
+   scoped --flag-* vars and theme tokens resolve in both themes). Read-only:
+   editing lives in the selection popover and the Inspector. */
+.prompt-editor .cm-tooltip.pi-hover {
+    max-width: 320px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--popover);
+    color: var(--popover-foreground);
+    box-shadow: 0 4px 12px oklch(0 0 0 / 0.12);
+}
+.prompt-editor .pi-hover-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.prompt-editor .pi-hover-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 9999px;
+    flex-shrink: 0;
+}
+.prompt-editor .pi-hover-name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.prompt-editor .pi-hover-flag {
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+.prompt-editor .pi-hover-note {
+    margin-top: 6px;
+    font-size: 11px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    /* ~12-line clamp with a hard cut — hover cards must never scroll. */
+    display: -webkit-box;
+    -webkit-line-clamp: 12;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.prompt-editor .pi-hover-meta {
+    margin-top: 6px;
+    font-size: 10px;
+    color: var(--muted-foreground);
+    font-variant-numeric: tabular-nums;
+}
+
 /* Region name tag rendered above each region's first line. */
 .prompt-editor .pi-region-startline::before {
     content: "── " attr(data-rname) " ";

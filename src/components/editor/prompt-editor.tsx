@@ -75,11 +75,18 @@ import {
 } from "@/lib/snippet-match"
 import type { MatchCandidate } from "@/lib/snippet-match"
 import { findExtension } from "@/lib/find"
+import { regionHover } from "@/lib/hover"
 import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
 import { Button } from "@/components/ui/button"
 import { FindBar } from "@/components/editor/find-bar"
 import { RegionPopover } from "@/components/editor/region-popover"
 import { ResizeHandle } from "@/components/ui/resize-handle"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
 // Cockpit-only CM extensions, swapped out (empty) while a slot is in Zen mode.
@@ -360,6 +367,7 @@ export function PromptEditor({ docId }: { docId: string }) {
           // After regions so find marks nest inside region tints (find bg on
           // top); current-match is opaque and wins regardless.
           findExtension(),
+          regionHover(),
           EditorView.updateListener.of((u) => {
             const hasEffects = u.transactions.some((t) => t.effects.length > 0)
             // The store write triggers on doc edits and REGION effects only.
@@ -769,6 +777,7 @@ export function PromptEditor({ docId }: { docId: string }) {
             marks={chrome?.marks ?? []}
             viewport={chrome?.viewport ?? null}
             onJump={jumpTo}
+            container={hostRef.current}
             className={cn(
               zen &&
                 "top-12 border-transparent bg-transparent transition-opacity duration-500",
@@ -1008,47 +1017,78 @@ function Ribbon({
   marks,
   viewport,
   onJump,
+  container,
   className,
 }: {
   marks: RibbonMark[]
   viewport: { topPct: number; heightPct: number } | null
   onJump: (r: Region) => void
+  /** Tooltip portal target (the editor container, for scoped CSS vars). */
+  container: HTMLElement | null
   className?: string
 }) {
   return (
-    <div
-      className={cn(
-        // top/bottom (not inset-y) so a zen `top-12` override merges cleanly.
-        "absolute top-2 right-1 bottom-2 w-2 overflow-hidden rounded-sm border bg-muted/40",
-        className
-      )}
-    >
-      {marks.map((m) => (
-        // max() floor: a region collapsed into a fold still renders a
-        // clickable sliver instead of vanishing.
-        <button
-          key={m.region.id}
-          type="button"
-          title={m.region.name}
-          onClick={() => onJump(m.region)}
-          className="absolute inset-x-0 block opacity-80 hover:opacity-100"
-          style={{
-            top: `${m.topPct}%`,
-            height: `max(3px, ${m.heightPct}%)`,
-            background: flagColor(m.region.flag),
-          }}
-        />
-      ))}
-      {viewport && (
-        <div
-          className="pointer-events-none absolute inset-x-0 rounded-[2px] border border-foreground/40 bg-foreground/10"
-          style={{
-            top: `${viewport.topPct}%`,
-            height: `${viewport.heightPct}%`,
-          }}
-        />
-      )}
-    </div>
+    <TooltipProvider delayDuration={300}>
+      <div
+        className={cn(
+          // top/bottom (not inset-y) so a zen `top-12` override merges cleanly.
+          "absolute top-2 right-1 bottom-2 w-2 overflow-hidden rounded-sm border bg-muted/40",
+          className
+        )}
+      >
+        {marks.map((m) => (
+          // max() floor: a region collapsed into a fold still renders a
+          // clickable sliver instead of vanishing.
+          <Tooltip key={m.region.id}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => onJump(m.region)}
+                className="absolute inset-x-0 block opacity-80 hover:opacity-100"
+                style={{
+                  top: `${m.topPct}%`,
+                  height: `max(3px, ${m.heightPct}%)`,
+                  background: flagColor(m.region.flag),
+                }}
+              />
+            </TooltipTrigger>
+            <TooltipContent
+              container={container}
+              side="left"
+              className="flex-col items-start gap-1"
+            >
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="size-1.5 shrink-0 rounded-full"
+                  style={{ background: flagColor(m.region.flag) }}
+                />
+                <span className="font-mono font-semibold">{m.region.name}</span>
+                <span
+                  className="text-[9px] font-semibold tracking-[0.12em] uppercase"
+                  style={{ color: flagColor(m.region.flag) }}
+                >
+                  {m.region.flag}
+                </span>
+              </span>
+              {m.region.note.trim().length > 0 && (
+                <span className="line-clamp-2 max-w-56 text-[11px] opacity-80">
+                  {m.region.note}
+                </span>
+              )}
+            </TooltipContent>
+          </Tooltip>
+        ))}
+        {viewport && (
+          <div
+            className="pointer-events-none absolute inset-x-0 rounded-[2px] border border-foreground/40 bg-foreground/10"
+            style={{
+              top: `${viewport.topPct}%`,
+              height: `${viewport.heightPct}%`,
+            }}
+          />
+        )}
+      </div>
+    </TooltipProvider>
   )
 }
 
