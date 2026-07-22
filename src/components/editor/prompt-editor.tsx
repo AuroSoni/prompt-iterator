@@ -73,8 +73,10 @@ import {
   findSnippetMatches,
 } from "@/lib/snippet-match"
 import type { MatchCandidate } from "@/lib/snippet-match"
+import { findExtension } from "@/lib/find"
 import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
 import { Button } from "@/components/ui/button"
+import { FindBar } from "@/components/editor/find-bar"
 import { ResizeHandle } from "@/components/ui/resize-handle"
 import { cn } from "@/lib/utils"
 
@@ -205,14 +207,23 @@ export function PromptEditor({ docId }: { docId: string }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const mountRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
+  // View mirrored to state so the FindBar (a React child) can dispatch against
+  // it — a ref alone wouldn't re-render the bar into existence.
+  const [view, setView] = useState<EditorView | null>(null)
   const [chrome, setChrome] = useState<Chrome | null>(null)
   const [zen, setZen] = useState(false)
   const [xray, setXray] = useState(false)
+  // Find bar: open/replace-mode + a docEpoch bumped on doc edits (only while
+  // open) that drives the bar's re-search.
+  const [findOpen, setFindOpen] = useState(false)
+  const [findReplace, setFindReplace] = useState(false)
+  const [docEpoch, setDocEpoch] = useState(0)
   // Zen ribbon is scroll-reactive: hot while scrolling, fades shortly after.
   const [ribbonHot, setRibbonHot] = useState(false)
   // Refs mirror mode state for CM keymap handlers created once at mount.
   const zenRef = useRef(zen)
   const xrayRef = useRef(xray)
+  const findOpenRef = useRef(findOpen)
 
   useEffect(() => {
     const mount = mountRef.current
@@ -251,6 +262,24 @@ export function PromptEditor({ docId }: { docId: string }) {
               },
             },
             {
+              // Ctrl+F opens find; Ctrl+H opens find+replace (find-only when
+              // the doc is read-only). Both unbound by default in this app.
+              key: "Mod-f",
+              run: () => {
+                setFindReplace(false)
+                setFindOpen(true)
+                return true
+              },
+            },
+            {
+              key: "Mod-h",
+              run: () => {
+                setFindReplace(!getDoc(docId)?.readOnly)
+                setFindOpen(true)
+                return true
+              },
+            },
+            {
               key: "Alt-z",
               run: () => {
                 setZen((z) => !z)
@@ -272,6 +301,11 @@ export function PromptEditor({ docId }: { docId: string }) {
             {
               key: "Escape",
               run: () => {
+                // Close the find bar first, then peel modes.
+                if (findOpenRef.current) {
+                  setFindOpen(false)
+                  return true
+                }
                 if (xrayRef.current) {
                   setXray(false)
                   return true
@@ -295,6 +329,9 @@ export function PromptEditor({ docId }: { docId: string }) {
           promptLanguage(),
           promptFolding(),
           regionExtensions(initial.regions),
+          // After regions so find marks nest inside region tints (find bg on
+          // top); current-match is opaque and wins regardless.
+          findExtension(),
           EditorView.updateListener.of((u) => {
             const hasEffects = u.transactions.some((t) => t.effects.length > 0)
             // The store write triggers on doc edits and REGION effects only.
@@ -331,11 +368,19 @@ export function PromptEditor({ docId }: { docId: string }) {
                 SCAN_DEBOUNCE_MS
               )
             }
+            // Drive the find bar's re-search after edits/replaces. Guarded on
+            // findOpenRef so closed-bar typing adds no renders.
+            if (u.docChanged && findOpenRef.current) {
+              setDocEpoch((e) => e + 1)
+            }
           }),
         ],
       }),
     })
     viewRef.current = view
+    setView(view)
+    // Close any find bar left open from a previous doc in this slot.
+    setFindOpen(false)
     registerView(docId, view)
     restoreFolds(view, docId)
     // Scan on open: content that arrived while this prompt was closed (or
@@ -359,9 +404,16 @@ export function PromptEditor({ docId }: { docId: string }) {
       window.clearTimeout(ribbonFade)
       unregisterView(docId, view)
       viewRef.current = null
+      setView(null)
       view.destroy()
     }
   }, [docId])
+
+  // Mirror find-open into a ref for the CM Escape handler (created once at
+  // mount, so it can't read the live state directly).
+  useEffect(() => {
+    findOpenRef.current = findOpen
+  }, [findOpen])
 
   // Mode switches reconfigure the SAME view — cursor, undo history, scroll
   // position, and regions all survive the toggle.
@@ -627,7 +679,19 @@ export function PromptEditor({ docId }: { docId: string }) {
               zen && !(xray || ribbonHot) && "pointer-events-none opacity-0"
             )}
           />
-          {zen && (
+          {findOpen && (
+            <FindBar
+              view={view}
+              replaceMode={findReplace}
+              readOnly={doc.readOnly}
+              docEpoch={docEpoch}
+              onClose={() => setFindOpen(false)}
+              onReplaceModeChange={setFindReplace}
+              className={cn("absolute top-2 z-30", zen ? "right-3" : "right-6")}
+            />
+          )}
+          {/* ZenControls yield the top-right corner to the find bar. */}
+          {zen && !findOpen && (
             <ZenControls
               tokens={chrome?.totalTokens ?? 0}
               xray={xray}
