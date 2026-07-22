@@ -33,7 +33,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { KindBadge } from "@/components/shell/editor-slot"
+import { ResizeHandle } from "@/components/ui/resize-handle"
 import { fmtTokens, useLibrary, type Prompt } from "@/lib/library"
+import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
 import { cn } from "@/lib/utils"
 
 interface LibrarySidebarProps {
@@ -377,6 +379,7 @@ export function LibrarySidebar({
   onSignOut,
 }: LibrarySidebarProps) {
   const { prompts, snippets } = useLibrary()
+  const { sidebarWidth } = useUiPrefs()
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [editingId, setEditingId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
@@ -414,7 +417,22 @@ export function LibrarySidebar({
   }
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground">
+    <aside
+      className="relative flex shrink-0 flex-col border-r bg-sidebar text-sidebar-foreground"
+      style={{ width: sidebarWidth }}
+    >
+      <ResizeHandle
+        edge="end"
+        value={sidebarWidth}
+        min={UI_LIMITS.sidebarWidth.min}
+        max={UI_LIMITS.sidebarWidth.max}
+        defaultValue={UI_LIMITS.sidebarWidth.def}
+        onChange={(w, commit) =>
+          setUiPrefs({ sidebarWidth: w }, { persist: commit })
+        }
+        label="Resize library sidebar"
+        className="absolute inset-y-0 -right-0.5"
+      />
       <header className="flex h-10 shrink-0 items-center justify-between border-b pr-1.5 pl-3">
         <h1 className="text-[13px] font-semibold tracking-tight">
           Prompt Workbench
