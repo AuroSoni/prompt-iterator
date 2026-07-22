@@ -22,15 +22,7 @@ import {
 } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
 import { foldedRanges, foldGutter, foldKeymap } from "@codemirror/language"
-import {
-  ArrowDownToLine,
-  ArrowUpFromLine,
-  BookmarkPlus,
-  Lock,
-  PanelLeft,
-  PanelRight,
-  Trash2,
-} from "lucide-react"
+import { Lock, PanelLeft, PanelRight } from "lucide-react"
 
 import {
   addRegionEffect,
@@ -64,10 +56,9 @@ import {
   updateDocContent,
   updateSnippetFromRegion,
   updateSnippetNote,
-  useLibrary,
   useSaveState,
 } from "@/lib/library"
-import type { DocKind, SaveState, Snippet } from "@/lib/library"
+import type { SaveState } from "@/lib/library"
 import {
   dismissSnippetMatch,
   effectiveDismissals,
@@ -77,8 +68,8 @@ import type { MatchCandidate } from "@/lib/snippet-match"
 import { findExtension } from "@/lib/find"
 import { regionHover } from "@/lib/hover"
 import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
-import { Button } from "@/components/ui/button"
 import { FindBar } from "@/components/editor/find-bar"
+import { Inspector } from "@/components/editor/inspector"
 import { RegionPopover } from "@/components/editor/region-popover"
 import { ResizeHandle } from "@/components/ui/resize-handle"
 import {
@@ -723,8 +714,6 @@ export function PromptEditor({ docId }: { docId: string }) {
     )
   }
 
-  const activeRegion =
-    chrome?.regions.find((r) => r.id === chrome.activeRegionId) ?? null
   const popoverRegion = popover
     ? (chrome?.regions.find((r) => r.id === popover.id) ?? null)
     : null
@@ -862,11 +851,13 @@ export function PromptEditor({ docId }: { docId: string }) {
               className="-mx-0.5 hidden @3xl:block"
             />
             <Inspector
-              region={activeRegion}
-              regionText={chrome?.activeRegionText ?? ""}
+              regions={chrome?.regions ?? []}
+              activeRegionId={chrome?.activeRegionId ?? null}
+              activeRegionText={chrome?.activeRegionText ?? ""}
               docId={docId}
               docKind={doc.kind}
               readOnly={doc.readOnly}
+              onJump={jumpTo}
               onPatch={patchRegion}
               onRemove={removeRegion}
               onPull={pullRegion}
@@ -1089,366 +1080,6 @@ function Ribbon({
         )}
       </div>
     </TooltipProvider>
-  )
-}
-
-// ---- Inspector -----------------------------------------------------------
-
-// The region↔snippet link panel: shows the linked snippet's name, usage, and
-// version, and the region's sync state (in sync / update available / local
-// edits / diverged) with the matching pull / push / promote actions. An
-// unlinked (or dangling) region gets a "make reusable" affordance instead.
-function SnippetLink({
-  region,
-  regionText,
-  snippet,
-  readOnly,
-  onPull,
-  onPush,
-  onPromote,
-  onMakeReusable,
-}: {
-  region: RegionInfo
-  regionText: string
-  snippet: Snippet | undefined
-  readOnly: boolean
-  onPull: (region: Region) => void
-  onPush: (region: Region) => void
-  onPromote: (region: Region) => void
-  onMakeReusable: (region: Region) => void
-}) {
-  // Unlinked, or dangling after its snippet was deleted: offer to (re)link.
-  if (!region.snippetId || !snippet) {
-    return readOnly ? null : (
-      <Button
-        size="sm"
-        variant="outline"
-        onClick={() => onMakeReusable(region)}
-        className="h-7 w-full justify-center gap-1.5 text-[11px]"
-      >
-        <BookmarkPlus className="size-3.5" /> Make reusable snippet
-      </Button>
-    )
-  }
-
-  const behind = (region.syncedVersion ?? 0) < snippet.version
-  const canonical = getSnippetBody(region.snippetId)
-  const diverged = canonical !== undefined && regionText !== canonical
-  const state = behind && diverged
-    ? "diverged"
-    : behind
-      ? "update"
-      : diverged
-        ? "local"
-        : "synced"
-  const label =
-    state === "synced"
-      ? "in sync"
-      : state === "update"
-        ? "update available"
-        : state === "local"
-          ? "local edits"
-          : "diverged"
-
-  return (
-    <div className="rounded-sm border bg-muted/30 p-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
-          {snippet.name}
-        </span>
-        <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-          v{snippet.version}
-        </span>
-      </div>
-      <div className="mt-0.5 text-[10px] text-muted-foreground">
-        snippet · used in {snippet.usedBy}{" "}
-        {snippet.usedBy === 1 ? "place" : "places"} · {label}
-      </div>
-      {/* One-way rollup: the snippet's own note, read-only here. To edit it,
-          open the snippet — the region's NOTE below stays prompt-local. */}
-      {snippet.note.trim() !== "" && (
-        <div className="mt-1.5 border-t pt-1.5">
-          <div className="text-[9px] font-semibold tracking-[0.12em] text-muted-foreground">
-            SNIPPET NOTE
-          </div>
-          <p className="mt-0.5 text-[11px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
-            {snippet.note}
-          </p>
-        </div>
-      )}
-      {!readOnly && (state !== "synced" || !snippet.library) && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {(state === "update" || state === "diverged") && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                if (
-                  state === "diverged" &&
-                  !window.confirm(
-                    "Pull replaces this region's local edits with the snippet's current text. Continue?"
-                  )
-                )
-                  return
-                onPull(region)
-              }}
-              className="h-7 gap-1 text-[11px]"
-            >
-              <ArrowDownToLine className="size-3.5" />
-              {state === "diverged" ? "Pull" : `Update to v${snippet.version}`}
-            </Button>
-          )}
-          {(state === "local" || state === "diverged") && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => onPush(region)}
-              className="h-7 gap-1 text-[11px]"
-            >
-              <ArrowUpFromLine className="size-3.5" /> Save as v
-              {snippet.version + 1}
-            </Button>
-          )}
-          {!snippet.library && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => onPromote(region)}
-              className="h-7 gap-1 text-[11px]"
-            >
-              <BookmarkPlus className="size-3.5" /> Add to library
-            </Button>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// Doc-level panel shown when the SNIPPET ITSELF is open and no region is
-// active: identity, live usage, and the snippet's own note — the source of
-// the one-way rollup that prompt inspectors render read-only.
-function SnippetDocPanel({
-  snippet,
-  readOnly,
-  onUpdateNote,
-}: {
-  snippet: Snippet
-  readOnly: boolean
-  onUpdateNote: (snippetId: string, note: string) => void
-}) {
-  return (
-    <div className="mt-3 space-y-4">
-      <div className="rounded-sm border bg-muted/30 p-2">
-        <div className="flex items-center justify-between gap-2">
-          <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
-            {snippet.name}
-          </span>
-          <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-            v{snippet.version}
-          </span>
-        </div>
-        <div className="mt-0.5 text-[10px] text-muted-foreground">
-          used in {snippet.usedBy} {snippet.usedBy === 1 ? "place" : "places"}
-          {snippet.stale > 0 && <> · {snippet.stale} behind</>}
-        </div>
-      </div>
-      <div>
-        <div className="mb-1.5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground">
-          NOTE — WHY THIS EXISTS
-        </div>
-        {/* Uncontrolled + keyed by the committed value: remounts on external
-            change; can't fire mid-typing (only this textarea edits the note). */}
-        <textarea
-          key={snippet.note}
-          defaultValue={snippet.note}
-          disabled={readOnly}
-          onBlur={(e) => {
-            if (e.target.value !== snippet.note)
-              onUpdateNote(snippet.id, e.target.value)
-          }}
-          aria-label="Snippet note"
-          className="min-h-24 w-full resize-y rounded-sm border bg-background p-2 text-xs leading-relaxed focus:border-ring focus:outline-none disabled:opacity-70"
-        />
-      </div>
-    </div>
-  )
-}
-
-function Inspector({
-  region,
-  regionText,
-  docId,
-  docKind,
-  readOnly,
-  onPatch,
-  onRemove,
-  onPull,
-  onPush,
-  onPromote,
-  onMakeReusable,
-  onUpdateSnippetNote,
-  className,
-  style,
-}: {
-  region: RegionInfo | null
-  regionText: string
-  docId: string
-  docKind: DocKind
-  readOnly: boolean
-  onPatch: (id: string, patch: Partial<Region>) => void
-  onRemove: (id: string) => void
-  onPull: (region: Region) => void
-  onPush: (region: Region) => void
-  onPromote: (region: Region) => void
-  onMakeReusable: (region: Region) => void
-  onUpdateSnippetNote: (snippetId: string, note: string) => void
-  className?: string
-  style?: React.CSSProperties
-}) {
-  // Subscribe so the link panel reflects live snippet version/usage counts.
-  const lib = useLibrary()
-  const snippet =
-    region?.snippetId != null
-      ? lib.snippets.find((s) => s.id === region.snippetId)
-      : undefined
-  // A snippet doc's id IS its snippet id (docs.set(sr.id, …) on hydrate).
-  const self =
-    docKind === "snippet" ? lib.snippets.find((s) => s.id === docId) : undefined
-
-  return (
-    <aside className={cn("overflow-y-auto p-4", className)} style={style}>
-      <h3 className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
-        INSPECTOR
-      </h3>
-      {!region ? (
-        self ? (
-          <SnippetDocPanel
-            snippet={self}
-            readOnly={readOnly}
-            onUpdateNote={onUpdateSnippetNote}
-          />
-        ) : (
-          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-            Place the cursor inside a region
-            {readOnly ? "." : ", or select text and mark a new one."}
-          </p>
-        )
-      ) : (
-        // Key by region id: uncontrolled fields reset when the region changes,
-        // but survive re-renders while typing (the prototype's dirty-tracking).
-        <div key={region.id} className="mt-3 space-y-4">
-          <input
-            defaultValue={region.name}
-            disabled={readOnly}
-            onBlur={(e) => {
-              const name = e.target.value.trim()
-              if (name && name !== region.name) onPatch(region.id, { name })
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") e.currentTarget.blur()
-            }}
-            aria-label="Region name"
-            className="w-full rounded-sm border border-transparent bg-transparent px-1 py-0.5 font-mono text-[13px] font-semibold focus:border-input focus:outline-none disabled:opacity-70"
-          />
-
-          <SnippetLink
-            region={region}
-            regionText={regionText}
-            snippet={snippet}
-            readOnly={readOnly}
-            onPull={onPull}
-            onPush={onPush}
-            onPromote={onPromote}
-            onMakeReusable={onMakeReusable}
-          />
-
-          <div>
-            <div className="mb-1.5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground">
-              FLAG
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {FLAGS.map((f) => {
-                const selected = region.flag === f
-                return (
-                  <button
-                    key={f}
-                    type="button"
-                    disabled={readOnly}
-                    onClick={() => onPatch(region.id, { flag: f })}
-                    className={cn(
-                      "rounded-sm border px-2 py-1 text-[10px] font-medium tracking-wide uppercase disabled:pointer-events-none disabled:opacity-50",
-                      !selected && "text-muted-foreground hover:bg-accent"
-                    )}
-                    style={
-                      selected
-                        ? {
-                            borderColor: flagColor(f),
-                            color: flagColor(f),
-                            background: `color-mix(in oklch, ${flagColor(f)} 10%, transparent)`,
-                          }
-                        : undefined
-                    }
-                  >
-                    {f}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
-          <div>
-            <div className="mb-1.5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground">
-              NOTE — WHY THIS EXISTS
-            </div>
-            <textarea
-              defaultValue={region.note}
-              disabled={readOnly}
-              onBlur={(e) => {
-                if (e.target.value !== region.note)
-                  onPatch(region.id, { note: e.target.value })
-              }}
-              aria-label="Region note"
-              className="min-h-24 w-full resize-y rounded-sm border bg-background p-2 text-xs leading-relaxed focus:border-ring focus:outline-none disabled:opacity-70"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-sm border bg-muted/40 p-2">
-              <div className="text-base font-bold tabular-nums">
-                {region.tokens}
-              </div>
-              <div className="mt-0.5 text-[9px] font-semibold tracking-[0.12em] text-muted-foreground">
-                TOKENS
-              </div>
-            </div>
-            <div className="rounded-sm border bg-muted/40 p-2">
-              <div className="text-base font-bold tabular-nums">
-                {region.pct}%
-              </div>
-              <div className="mt-0.5 text-[9px] font-semibold tracking-[0.12em] text-muted-foreground">
-                OF PROMPT
-              </div>
-            </div>
-          </div>
-
-          {/* Removing the annotation leaves the prose it covered in place. */}
-          {!readOnly && (
-            <div className="border-t pt-3">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onRemove(region.id)}
-                className="h-8 w-full justify-start gap-2 px-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
-              >
-                <Trash2 className="size-3.5" />
-                Remove region
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
-    </aside>
   )
 }
 
