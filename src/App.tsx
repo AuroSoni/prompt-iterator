@@ -14,6 +14,7 @@ import {
   createPrompt,
   createSnippet,
   deleteDoc,
+  flushPendingNow,
   getDoc,
   getSnippet,
   getSnippetBody,
@@ -37,6 +38,21 @@ function App() {
   // client never hits the authenticated-only DB. Idempotent under StrictMode.
   useEffect(() => {
     initAuth()
+  }, [])
+
+  // Ctrl/Cmd+S anywhere outside the editor (sidebar, inspector) force-saves
+  // too. The editor's own Mod-s keymap handles it first and preventDefaults,
+  // which the guard respects — no double flush, no browser Save dialog.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s") {
+        if (e.defaultPrevented) return
+        e.preventDefault()
+        void flushPendingNow()
+      }
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
   }, [])
 
   const handleOpenDocsChange = useCallback(

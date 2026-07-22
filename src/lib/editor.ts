@@ -5,13 +5,7 @@
 
 import { StateEffect, StateField } from "@codemirror/state"
 import type { EditorState, Extension, Range } from "@codemirror/state"
-import {
-  Decoration,
-  EditorView,
-  MatchDecorator,
-  ViewPlugin,
-} from "@codemirror/view"
-import type { DecorationSet, ViewUpdate } from "@codemirror/view"
+import { Decoration, EditorView } from "@codemirror/view"
 
 export type Flag = "ok" | "suspect" | "stale" | "revisit"
 
@@ -132,42 +126,13 @@ const regionStartLines = EditorView.decorations.compute(
   }
 )
 
-// ---- Markdown-ish highlighting (no full language package needed) ---------
-
-const mdDeco = new MatchDecorator({
-  regexp: /(^#{1,3} .*$)|(\*\*[^*\n]+\*\*)|(\{\{[a-z_]+\}\})|(`[^`\n]+`)/g,
-  decoration: (m) =>
-    Decoration.mark({
-      class: m[1]
-        ? "pi-md-heading"
-        : m[2]
-          ? "pi-md-bold"
-          : m[3]
-            ? "pi-md-var"
-            : "pi-md-code",
-    }),
-})
-
-const markdownHighlight = ViewPlugin.fromClass(
-  class {
-    decorations: DecorationSet
-    constructor(view: EditorView) {
-      this.decorations = mdDeco.createDeco(view)
-    }
-    update(u: ViewUpdate) {
-      this.decorations = mdDeco.updateDeco(u, this.decorations)
-    }
-  },
-  { decorations: (v) => v.decorations }
-)
-
-/** Everything region-related, seeded with a doc's stored regions. */
+/** Everything region-related, seeded with a doc's stored regions. Syntax
+ *  highlighting lives in @/lib/language (grammar-based) — not here. */
 export function regionExtensions(initial: Region[]): Extension {
   return [
     regionsField.init(() => initial.map((r) => ({ ...r }))),
     regionMarks,
     regionStartLines,
-    markdownHighlight,
   ]
 }
 

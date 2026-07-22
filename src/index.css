@@ -166,6 +166,8 @@
     --md-heading: oklch(0.5 0.134 242.749);     /* sky-700 */
     --md-var: oklch(0.491 0.27 292.581);        /* violet-700 */
     --md-code: oklch(0.555 0.163 48.998);       /* amber-700 */
+    --md-tag: oklch(0.511 0.096 186.391);       /* teal-700 */
+    --md-string: oklch(0.527 0.154 150.069);    /* green-700 */
 }
 .dark .prompt-editor {
     --flag-ok: oklch(0.765 0.177 163.223);      /* emerald-400 */
@@ -175,6 +177,8 @@
     --md-heading: oklch(0.746 0.16 232.661);    /* sky-400 */
     --md-var: oklch(0.702 0.183 293.541);       /* violet-400 */
     --md-code: oklch(0.828 0.189 84.429);       /* amber-400 */
+    --md-tag: oklch(0.777 0.152 181.912);       /* teal-400 */
+    --md-string: oklch(0.792 0.209 151.711);    /* green-400 */
 }
 
 .prompt-editor .cm-editor {
@@ -198,6 +202,21 @@
     border-right: 1px solid var(--border);
     padding-right: 4px;
 }
+.prompt-editor .cm-foldGutter .cm-gutterElement {
+    cursor: pointer;
+    color: color-mix(in oklch, var(--muted-foreground) 50%, transparent);
+}
+.prompt-editor .cm-foldGutter .cm-gutterElement:hover {
+    color: var(--foreground);
+}
+.prompt-editor .cm-foldPlaceholder {
+    background: var(--muted);
+    border: 1px solid var(--border);
+    color: var(--muted-foreground);
+    border-radius: 4px;
+    padding: 0 6px;
+    margin: 0 4px;
+}
 .prompt-editor .cm-activeLine {
     background: color-mix(in oklch, var(--foreground) 4%, transparent);
 }
@@ -209,10 +228,25 @@
     background: color-mix(in oklch, var(--primary) 18%, transparent);
 }
 
-.prompt-editor .pi-md-heading { color: var(--md-heading); font-weight: 700; }
-.prompt-editor .pi-md-bold { font-weight: 700; }
-.prompt-editor .pi-md-var { color: var(--md-var); }
-.prompt-editor .pi-md-code { color: var(--md-code); }
+/* Grammar highlighting (@lezer/highlight classHighlighter → tok-* classes,
+   see src/lib/language.ts). Colors ride the editor tokens above, so dark mode
+   and zen/x-ray restyle purely in CSS. */
+.prompt-editor .tok-heading { color: var(--md-heading); font-weight: 700; }
+.prompt-editor .tok-strong { font-weight: 700; }
+.prompt-editor .tok-emphasis { font-style: italic; }
+.prompt-editor .tok-monospace { color: var(--md-code); }
+.prompt-editor .tok-meta,
+.prompt-editor .tok-punctuation { color: color-mix(in oklch, var(--muted-foreground) 75%, transparent); }
+.prompt-editor .tok-typeName { color: var(--md-tag); }          /* XML tag names */
+.prompt-editor .tok-propertyName { color: var(--md-heading); }  /* JSON keys, XML attrs */
+.prompt-editor .tok-string { color: var(--md-string); }
+.prompt-editor .tok-number,
+.prompt-editor .tok-bool,
+.prompt-editor .tok-atom,
+.prompt-editor .tok-literal { color: var(--md-var); }
+.prompt-editor .tok-url,
+.prompt-editor .tok-link { color: var(--muted-foreground); text-decoration: underline; }
+.prompt-editor .pi-jinja { color: var(--md-var); }
 
 .prompt-editor .pi-flag-ok      { background: color-mix(in oklch, var(--flag-ok) 6%, transparent); }
 .prompt-editor .pi-flag-suspect { background: color-mix(in oklch, var(--flag-suspect) 10%, transparent); }
@@ -253,7 +287,7 @@
     padding: 48px 24px 35vh;
     transition: color 0.35s;
 }
-.prompt-editor.pe-zen .pi-md-heading { font-size: 1.1em; }
+.prompt-editor.pe-zen .tok-heading { font-size: 1.1em; }
 
 /* Zen without X-ray: regions recede to a faint section glyph. */
 .prompt-editor.pe-zen .pi-region {
@@ -278,9 +312,8 @@
 .prompt-editor.pe-xray .cm-content {
     color: color-mix(in oklch, var(--foreground) 20%, transparent);
 }
-.prompt-editor.pe-xray .pi-md-heading,
-.prompt-editor.pe-xray .pi-md-var,
-.prompt-editor.pe-xray .pi-md-code { color: inherit; }
+.prompt-editor.pe-xray [class*="tok-"],
+.prompt-editor.pe-xray .pi-jinja { color: inherit; }
 .prompt-editor.pe-xray .pi-region {
     color: color-mix(in oklch, var(--foreground) 62%, transparent);
 }

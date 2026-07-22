@@ -21,6 +21,7 @@ import {
   lineNumbers,
 } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
+import { foldedRanges, foldGutter, foldKeymap } from "@codemirror/language"
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -46,8 +47,11 @@ import {
   updateRegionEffect,
 } from "@/lib/editor"
 import type { Flag, Region, RegionInfo, RibbonSegment } from "@/lib/editor"
+import { promptFolding, restoreFolds, saveFolds } from "@/lib/fold"
+import { promptLanguage } from "@/lib/language"
 import {
   createSnippetFromText,
+  flushPendingNow,
   getDoc,
   getSnippet,
   getSnippetBody,
@@ -56,8 +60,9 @@ import {
   updateDocContent,
   updateSnippetFromRegion,
   useLibrary,
+  useSaveState,
 } from "@/lib/library"
-import type { Snippet } from "@/lib/library"
+import type { SaveState, Snippet } from "@/lib/library"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -71,6 +76,7 @@ function flagColor(flag: Flag): string {
 const modeCompartment = new Compartment()
 const cockpitExtras = () => [
   lineNumbers(),
+  foldGutter(),
   highlightActiveLine(),
   highlightActiveLineGutter(),
 ]
@@ -130,6 +136,7 @@ function readChrome(view: EditorView, host: HTMLElement): Chrome {
 
 export function PromptEditor({ docId }: { docId: string }) {
   const doc = getDoc(docId)
+  const saveState = useSaveState(docId)
   const hostRef = useRef<HTMLDivElement>(null)
   const mountRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
@@ -168,6 +175,16 @@ export function PromptEditor({ docId }: { docId: string }) {
           // renders but must observe current mode state.
           keymap.of([
             {
+              // Force-save: skip the debounce and flush now (DB when
+              // persistent, localStorage otherwise). Returning true makes CM
+              // preventDefault, so the browser Save dialog never opens.
+              key: "Mod-s",
+              run: () => {
+                void flushPendingNow()
+                return true
+              },
+            },
+            {
               key: "Alt-z",
               run: () => {
                 setZen((z) => !z)
@@ -201,20 +218,37 @@ export function PromptEditor({ docId }: { docId: string }) {
               },
             },
           ]),
-          keymap.of([...defaultKeymap, ...historyKeymap]),
+          keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap]),
           modeCompartment.of(cockpitExtras()),
           EditorView.lineWrapping,
           EditorState.readOnly.of(initial.readOnly),
           EditorView.editable.of(!initial.readOnly),
+          promptLanguage(),
+          promptFolding(),
           regionExtensions(initial.regions),
           EditorView.updateListener.of((u) => {
             const hasEffects = u.transactions.some((t) => t.effects.length > 0)
-            if (u.docChanged || hasEffects) {
+            // The store write triggers on doc edits and REGION effects only.
+            // Triggering on any effect would turn fold/unfold gestures (and
+            // zen reconfigures, scrollIntoView) into no-op Supabase UPDATEs.
+            const hasRegionEffects = u.transactions.some((t) =>
+              t.effects.some(
+                (e) =>
+                  e.is(addRegionEffect) ||
+                  e.is(updateRegionEffect) ||
+                  e.is(removeRegionEffect)
+              )
+            )
+            if (u.docChanged || hasRegionEffects) {
               updateDocContent(
                 docId,
                 u.state.doc.toString(),
                 u.state.field(regionsField)
               )
+            }
+            // Fold changes are view-state: persisted locally, never to the DB.
+            if (foldedRanges(u.state) !== foldedRanges(u.startState)) {
+              saveFolds(docId, u.state)
             }
             if (u.docChanged || u.geometryChanged || u.selectionSet || hasEffects) {
               schedule(u.view)
@@ -225,6 +259,7 @@ export function PromptEditor({ docId }: { docId: string }) {
     })
     viewRef.current = view
     registerView(docId, view)
+    restoreFolds(view, docId)
     let ribbonFade = 0
     const onScroll = () => {
       schedule(view)
@@ -518,6 +553,7 @@ export function PromptEditor({ docId }: { docId: string }) {
       {!zen && (
         <StatusBar
           chrome={chrome}
+          saveState={saveState}
           readOnly={doc.readOnly}
           onZen={() => setZen(true)}
         />
@@ -971,12 +1007,23 @@ function Inspector({
 
 // ---- Status bar ----------------------------------------------------------
 
+// Indicator copy + color per save state; "saved" stays quiet (muted, no dot).
+const SAVE_BADGES: Record<SaveState, { label: string; color?: string }> = {
+  saved: { label: "saved" },
+  dirty: { label: "unsaved", color: "var(--flag-suspect)" },
+  saving: { label: "saving…" },
+  error: { label: "save failed — retrying", color: "var(--flag-stale)" },
+  local: { label: "saved locally", color: "var(--flag-revisit)" },
+}
+
 function StatusBar({
   chrome,
+  saveState,
   readOnly,
   onZen,
 }: {
   chrome: Chrome | null
+  saveState: SaveState
   readOnly: boolean
   onZen: () => void
 }) {
@@ -986,6 +1033,7 @@ function StatusBar({
       n: chrome?.regions.filter((r) => r.flag === f).length ?? 0,
     }))
     .filter(({ n }) => n > 0)
+  const badge = SAVE_BADGES[saveState]
 
   return (
     <footer className="flex h-6 shrink-0 items-center gap-3 border-t bg-muted/40 px-3 text-[11px] text-muted-foreground">
@@ -999,6 +1047,21 @@ function StatusBar({
         </span>
       ))}
       <span className="flex-1" />
+      {!readOnly && (
+        <span
+          className="inline-flex items-center gap-1.5"
+          style={badge.color ? { color: badge.color } : undefined}
+        >
+          {badge.color && (
+            <span
+              aria-hidden
+              className="size-1.5 rounded-full"
+              style={{ background: badge.color }}
+            />
+          )}
+          {badge.label}
+        </span>
+      )}
       <button
         type="button"
         title="Zen focus mode (Alt+Z)"
