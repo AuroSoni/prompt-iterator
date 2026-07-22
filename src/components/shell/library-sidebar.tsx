@@ -2,7 +2,6 @@ import { useRef, useState } from "react"
 import type { ReactNode } from "react"
 import {
   BookmarkPlus,
-  ChevronRight,
   Import,
   LogOut,
   MoreHorizontal,
@@ -258,9 +257,7 @@ function SectionHeader({
 
 interface PromptItemProps {
   prompt: Prompt
-  expanded: boolean
   editing: boolean
-  onToggleExpanded: () => void
   onStartRename: (id: string) => void
   onCommitRename: (id: string, name: string) => void
   onCancelRename: () => void
@@ -273,9 +270,7 @@ interface PromptItemProps {
 
 function PromptItem({
   prompt,
-  expanded,
   editing,
-  onToggleExpanded,
   onStartRename,
   onCommitRename,
   onCancelRename,
@@ -295,71 +290,31 @@ function PromptItem({
     )
   }
 
+  // Version rows + expand chevron intentionally absent: the version UI is
+  // deferred until versioning actually ships (docs of kind "version" remain in
+  // the store — they're just unreachable from the sidebar for now).
   return (
-    <div>
-      <Row
-        docId={prompt.id}
-        active={activeDocId === prompt.id}
-        open={openDocIds.includes(prompt.id)}
-        onOpen={onOpenDoc}
-        onOpenToSide={onOpenDocToSide}
-        actions={
-          <RowMenu
-            onRename={() => onStartRename(prompt.id)}
-            onDelete={() =>
-              onRequestDelete({ id: prompt.id, name: prompt.name, kind: "prompt" })
-            }
-          />
-        }
-      >
-        <button
-          type="button"
-          className="-ml-1 inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
-          onClick={(e) => {
-            e.stopPropagation()
-            onToggleExpanded()
-          }}
-          aria-label={expanded ? "Collapse versions" : "Expand versions"}
-          aria-expanded={expanded}
-        >
-          <ChevronRight
-            className={cn(
-              "size-3.5 transition-transform",
-              expanded && "rotate-90"
-            )}
-          />
-        </button>
-        <KindBadge kind="prompt" className="size-3.5 text-[9px]" />
-        <span className="min-w-0 flex-1 truncate">{prompt.name}</span>
-        <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-          {fmtTokens(prompt.tokens)}
-        </span>
-      </Row>
-      {expanded &&
-        prompt.versions.map((v) => (
-          <Row
-            key={v.id}
-            docId={v.id}
-            active={activeDocId === v.id}
-            open={openDocIds.includes(v.id)}
-            indent
-            onOpen={onOpenDoc}
-            onOpenToSide={onOpenDocToSide}
-          >
-            <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-              v{v.n}
-            </span>
-            {v.n === prompt.currentVersion && (
-              <span className="shrink-0 rounded-sm bg-sidebar-accent px-1 py-px text-[10px] font-medium text-muted-foreground">
-                current
-              </span>
-            )}
-            <span className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">
-              {v.message}
-            </span>
-          </Row>
-        ))}
-    </div>
+    <Row
+      docId={prompt.id}
+      active={activeDocId === prompt.id}
+      open={openDocIds.includes(prompt.id)}
+      onOpen={onOpenDoc}
+      onOpenToSide={onOpenDocToSide}
+      actions={
+        <RowMenu
+          onRename={() => onStartRename(prompt.id)}
+          onDelete={() =>
+            onRequestDelete({ id: prompt.id, name: prompt.name, kind: "prompt" })
+          }
+        />
+      }
+    >
+      <KindBadge kind="prompt" className="size-3.5 text-[9px]" />
+      <span className="min-w-0 flex-1 truncate">{prompt.name}</span>
+      <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+        {fmtTokens(prompt.tokens)}
+      </span>
+    </Row>
   )
 }
 
@@ -380,7 +335,6 @@ export function LibrarySidebar({
 }: LibrarySidebarProps) {
   const { prompts, snippets } = useLibrary()
   const { sidebarWidth } = useUiPrefs()
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [editingId, setEditingId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const rowProps = { activeDocId, openDocIds, onOpenDoc, onOpenDocToSide }
@@ -456,11 +410,7 @@ export function LibrarySidebar({
           <PromptItem
             key={prompt.id}
             prompt={prompt}
-            expanded={!!expanded[prompt.id]}
             editing={editingId === prompt.id}
-            onToggleExpanded={() =>
-              setExpanded((e) => ({ ...e, [prompt.id]: !e[prompt.id] }))
-            }
             onStartRename={setEditingId}
             onCommitRename={commitRename}
             onCancelRename={cancelRename}
