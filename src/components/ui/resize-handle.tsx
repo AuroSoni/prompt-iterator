@@ -77,7 +77,14 @@ export function ResizeHandle({
       onPointerDown={(e) => {
         if (e.button !== 0) return
         e.preventDefault()
-        e.currentTarget.setPointerCapture(e.pointerId)
+        // Capture can throw NotFoundError if the pointer vanished between
+        // event and call (pen lift, device removal). The drag still works
+        // while the pointer stays over the handle, so degrade instead of die.
+        try {
+          e.currentTarget.setPointerCapture(e.pointerId)
+        } catch {
+          // no capture — pointermove/up on the element still drive the drag
+        }
         const parent = e.currentTarget.parentElement
         const effMax = maxFraction && parent
           ? Math.min(max, parent.getBoundingClientRect().width * maxFraction)
