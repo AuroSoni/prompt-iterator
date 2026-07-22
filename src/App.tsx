@@ -24,12 +24,13 @@ import {
   useLibrary,
 } from "@/lib/library"
 import { isSupabaseConfigured } from "@/lib/supabase"
+import { setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
 
 function App() {
   const workspaceRef = useRef<WorkspaceHandle>(null)
   const { status: authStatus } = useAuth()
   const { status, error } = useLibrary()
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const { sidebarCollapsed } = useUiPrefs()
   const [openDocIds, setOpenDocIds] = useState<string[]>([])
   const [activeDocId, setActiveDocId] = useState<string | null>(null)
 
@@ -190,7 +191,9 @@ function App() {
       <div className="flex min-h-0 flex-1">
         <LibrarySidebar
           collapsed={sidebarCollapsed}
-          onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
+          onToggleCollapsed={() =>
+            setUiPrefs({ sidebarCollapsed: !sidebarCollapsed })
+          }
           activeDocId={activeDocId}
           openDocIds={openDocIds}
           onOpenDoc={(id) => workspaceRef.current?.openDoc(id)}

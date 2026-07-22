@@ -14,6 +14,7 @@ export interface UiPrefs {
   inspectorWidth: number
   outlineVisible: boolean
   inspectorVisible: boolean
+  sidebarCollapsed: boolean
 }
 
 /** Defaults mirror the pre-resize Tailwind widths (w-64 / w-52 / w-60), so a
@@ -44,13 +45,16 @@ function sanitize(raw: unknown): UiPrefs {
       ? clamp(Math.round(v), min, max)
       : def
   }
-  const bool = (k: string) => (typeof r[k] === "boolean" ? (r[k] as boolean) : true)
+  const bool = (k: string, def = true) =>
+    typeof r[k] === "boolean" ? (r[k] as boolean) : def
   return {
     sidebarWidth: num("sidebarWidth"),
     outlineWidth: num("outlineWidth"),
     inspectorWidth: num("inspectorWidth"),
     outlineVisible: bool("outlineVisible"),
     inspectorVisible: bool("inspectorVisible"),
+    // Panes default visible; the sidebar defaults expanded.
+    sidebarCollapsed: bool("sidebarCollapsed", false),
   }
 }
 
@@ -83,7 +87,8 @@ export function setUiPrefs(
     next.outlineWidth !== prefs.outlineWidth ||
     next.inspectorWidth !== prefs.inspectorWidth ||
     next.outlineVisible !== prefs.outlineVisible ||
-    next.inspectorVisible !== prefs.inspectorVisible
+    next.inspectorVisible !== prefs.inspectorVisible ||
+    next.sidebarCollapsed !== prefs.sidebarCollapsed
   if (changed) prefs = next
   if (opts?.persist !== false) writeJSON(KEY, prefs)
   if (changed) emit()

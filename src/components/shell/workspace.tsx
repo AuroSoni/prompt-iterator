@@ -5,6 +5,7 @@ import type {
   DockviewApi,
   DockviewReadyEvent,
   IDockviewPanel,
+  SerializedDockview,
 } from "dockview-react"
 import "dockview-react/dist/styles/dockview.css"
 
@@ -15,9 +16,17 @@ import {
   type SlotParams,
 } from "@/components/shell/editor-slot"
 import { firstPromptId, getDoc } from "@/lib/library"
+import { readJSON, removeKey, writeJSON } from "@/lib/local"
 
 /** The shell holds at most four generic editor slots (Phase 0 decision). */
 export const MAX_SLOTS = 4
+
+/** Serialized dockview grid (open docs, splits, sizes, active group). View
+ *  state like ui-prefs: localStorage only, never the DB. */
+const LAYOUT_KEY = "pw:v1:layout"
+
+/** onDidLayoutChange fires per micro-step of a resize drag; batch to one write. */
+const LAYOUT_SAVE_DELAY_MS = 500
 
 export interface WorkspaceHandle {
   /** Open a doc in the active slot — a library click fills what you're looking at. */
@@ -167,6 +176,23 @@ export function Workspace({
   ])
 
   const disposablesRef = useRef<Array<{ dispose(): void }>>([])
+  const saveTimerRef = useRef(0)
+
+  const saveLayoutNow = useCallback(() => {
+    window.clearTimeout(saveTimerRef.current)
+    const api = apiRef.current
+    if (!api) return
+    try {
+      writeJSON(LAYOUT_KEY, api.toJSON())
+    } catch {
+      // Dockview mid-disposal — the last debounced save already captured state.
+    }
+  }, [])
+
+  const scheduleLayoutSave = useCallback(() => {
+    window.clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = window.setTimeout(saveLayoutNow, LAYOUT_SAVE_DELAY_MS)
+  }, [saveLayoutNow])
 
   const handleReady = useCallback(
     (event: DockviewReadyEvent) => {
@@ -175,25 +201,46 @@ export function Workspace({
         event.api.onDidAddPanel(sync),
         event.api.onDidRemovePanel(sync),
         event.api.onDidActivePanelChange(sync),
+        event.api.onDidLayoutChange(scheduleLayoutSave),
       ]
-      // Fresh workspace: open the first prompt so the shell never starts empty.
-      // Valid here because the shell only mounts once the library is hydrated.
+      // Restore the previous session's grid. Panels carry their docId in
+      // params, so the layout round-trips whole; docs deleted since the save
+      // are pruned (the shell only mounts post-hydration, so getDoc is
+      // authoritative). A malformed payload starts fresh.
+      const saved = readJSON<SerializedDockview>(LAYOUT_KEY)
+      if (saved) {
+        try {
+          event.api.fromJSON(saved)
+          for (const panel of [...event.api.panels]) {
+            const id = docIdOf(panel)
+            if (!id || !getDoc(id)) panel.api.close()
+          }
+        } catch {
+          event.api.clear()
+          removeKey(LAYOUT_KEY)
+        }
+      }
+      // Fresh workspace (nothing stored, or nothing survived pruning): open
+      // the first prompt so the shell never starts empty.
       const first = firstPromptId()
       if (first && event.api.panels.length === 0) {
         addSlot(event.api, "slot-1", first)
       }
       sync()
     },
-    [sync]
+    [scheduleLayoutSave, sync]
   )
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // A reload inside the debounce window must not lose the last change.
+    window.addEventListener("beforeunload", saveLayoutNow)
+    return () => {
+      window.removeEventListener("beforeunload", saveLayoutNow)
+      saveLayoutNow()
       disposablesRef.current.forEach((d) => d.dispose())
       disposablesRef.current = []
-    },
-    []
-  )
+    }
+  }, [saveLayoutNow])
 
   return (
     <DockviewReact
