@@ -80,10 +80,22 @@ function flagColor(flag: Flag): string {
 const modeCompartment = new Compartment()
 const cockpitExtras = () => [
   lineNumbers(),
-  foldGutter(),
   highlightActiveLine(),
   highlightActiveLineGutter(),
 ]
+
+// The fold gutter is always-on (NOT in the mode compartment): zen keeps a
+// fold affordance, restyled quiet via .pe-zen CSS. markerDOM emits classed
+// spans because CM's default markers carry no open/closed class for CSS to
+// distinguish; the glyphs match CM's defaults so cockpit looks unchanged.
+const promptFoldGutter = foldGutter({
+  markerDOM: (open) => {
+    const m = document.createElement("span")
+    m.className = open ? "pe-fold pe-fold-open" : "pe-fold pe-fold-closed"
+    m.textContent = open ? "⌄" : "›"
+    return m
+  },
+})
 
 /** Everything the React chrome needs, read from the CM state in one place. */
 interface Chrome {
@@ -226,6 +238,9 @@ export function PromptEditor({ docId }: { docId: string }) {
           ]),
           keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap]),
           modeCompartment.of(cockpitExtras()),
+          // After the compartment: gutters render in extension order, so line
+          // numbers stay left of the fold gutter in cockpit mode.
+          promptFoldGutter,
           EditorView.lineWrapping,
           EditorState.readOnly.of(initial.readOnly),
           EditorView.editable.of(!initial.readOnly),
