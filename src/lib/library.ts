@@ -19,6 +19,7 @@ import { useSyncExternalStore } from "react"
 import { approxTokens } from "@/lib/editor"
 import type { Region } from "@/lib/editor"
 import type { Database } from "@/lib/database.types"
+import { readJSON, removeKey, writeJSON } from "@/lib/local"
 import { supabase } from "@/lib/supabase"
 
 export type DocKind = "prompt" | "snippet" | "version"
@@ -705,11 +706,59 @@ export function hydrate(): Promise<void> {
   return hydratePromise
 }
 
+// Flush the last debounced edit when the tab is hidden or closed.
+// visibilitychange fires while the page is still alive (reliable on tab
+// switch / mobile background); beforeunload is a weaker last resort whose
+// fetch the browser may cancel mid-unload. Registered once for the app's
+// lifetime — they read live module state, so re-login needn't re-add them.
+// Registered in EVERY hydrate branch: in fallback mode the flush lands in
+// localStorage, and losing the last 500ms there would be just as real.
+function registerFlushListeners(): void {
+  if (flushListenersRegistered) return
+  flushListenersRegistered = true
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushPending()
+  })
+  window.addEventListener("beforeunload", flushPending)
+}
+
+/** Re-apply localStorage fallback docs over freshly built seed data. Only ids
+ *  that exist in `data` are overlaid (orphan keys from older sessions are
+ *  ignored); overlaid docs surface as "saved locally". Runs BEFORE applyState
+ *  so canonicalBody seeding sees the overlaid snippet bodies. */
+function overlayLocalDocs(data: LibraryData): void {
+  for (const [id, doc] of data.docs) {
+    if (doc.kind !== "prompt" && doc.kind !== "snippet") continue
+    const stored = readJSON<{
+      body: string
+      regions: Region[]
+      tokens: number
+    }>(docKey(id))
+    if (!stored || typeof stored.body !== "string") continue
+    const regions = Array.isArray(stored.regions) ? stored.regions : []
+    const tokens = approxTokens(stored.body)
+    data.docs.set(id, { ...doc, body: stored.body, regions, tokens })
+    if (doc.kind === "prompt") {
+      data.prompts = data.prompts.map((p) =>
+        p.id === id ? { ...p, tokens } : p
+      )
+    } else {
+      data.snippets = data.snippets.map((s) =>
+        s.id === id ? { ...s, tokens } : s
+      )
+    }
+    setSaveState(id, "local")
+  }
+}
+
 async function runHydrate(): Promise<void> {
   const seed = buildSeedData()
   if (!supabase) {
-    // No backend configured: run purely in memory, no write-through.
+    // No backend configured: run purely in memory; edits fall back to
+    // localStorage (write path in runFlush) and are restored here.
+    overlayLocalDocs(seed)
     applyState(seed, null)
+    registerFlushListeners()
     return
   }
   try {
@@ -718,27 +767,20 @@ async function runHydrate(): Promise<void> {
     // written to it. Set before applyState so a sync subscriber sees it.
     persistent = true
     applyState(data, null)
-    // Flush the last debounced edit when the tab is hidden or closed.
-    // visibilitychange fires while the page is still alive (reliable on tab
-    // switch / mobile background); beforeunload is a weaker last resort whose
-    // fetch the browser may cancel mid-unload. Registered once for the app's
-    // lifetime — they read live module state, so re-login needn't re-add them.
-    if (!flushListenersRegistered) {
-      flushListenersRegistered = true
-      document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "hidden") flushPending()
-      })
-      window.addEventListener("beforeunload", flushPending)
-    }
+    registerFlushListeners()
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     console.warn("[library] Supabase unavailable — using in-memory seeds:", msg)
     // persistent stays false: never write seed content back over rows we
-    // could not read.
+    // could not read. Local fallback edits still restore and keep saving to
+    // localStorage — but they are never auto-pushed to the DB (persistent is
+    // the sole gate on the Supabase write path).
+    overlayLocalDocs(seed)
     applyState(
       seed,
-      "Working from local sample data — couldn't reach Supabase. Edits won't be saved."
+      "Working from local sample data — couldn't reach Supabase. Edits are saved in this browser only."
     )
+    registerFlushListeners()
   }
 }
 
@@ -891,9 +933,34 @@ export function flushPending(): void {
   void runFlush()
 }
 
+/** Doc-body fallback key — written only when the store is not DB-backed. */
+const docKey = (id: string) => `pw:v1:doc:${id}`
+
+/** Fallback persistence: land the drained batch in localStorage. Same
+ *  pipeline as the DB path, different sink — `persistent` can never be true
+ *  here, so local content cannot leak into Supabase. */
+function flushLocal(writes: [string, PendingWrite][]): void {
+  let quotaFailed = false
+  for (const [id, w] of writes) {
+    const ok = writeJSON(docKey(id), {
+      body: w.body,
+      regions: w.regions,
+      tokens: w.tokens,
+      savedAt: Date.now(),
+    })
+    setSaveState(id, ok ? "local" : "error")
+    if (!ok) quotaFailed = true
+  }
+  if (quotaFailed) {
+    // reportError dedupes repeat messages (and then skips its emit), so emit
+    // unconditionally below — the saving→error transition must reach the UI.
+    reportError("Couldn't save locally — browser storage is full or blocked.")
+  }
+  emit()
+}
+
 async function runFlush(): Promise<void> {
-  if (!persistent || !supabase || pending.size === 0) return
-  const sb = supabase
+  if (pending.size === 0) return
   const now = new Date().toISOString()
   const writes = [...pending.entries()]
   pending.clear()
@@ -904,6 +971,13 @@ async function runFlush(): Promise<void> {
     if (setSaveState(id, "saving")) stateChanged = true
   }
   if (stateChanged) emit()
+
+  // Not DB-backed (unconfigured, or unreachable at load): localStorage sink.
+  if (!persistent || !supabase) {
+    flushLocal(writes)
+    return
+  }
+  const sb = supabase
 
   const results = await Promise.all(
     writes.map(async ([id, w]) => {
@@ -1001,8 +1075,9 @@ export function updateDocContent(
     snippets = snippets.map((s) => (s.id === id ? { ...s, tokens } : s))
   }
   // Queue before the emit so the dirty transition rides the same notify.
-  // Only write through when genuinely backed by Supabase (see `persistent`).
-  if (persistent && (doc.kind === "prompt" || doc.kind === "snippet")) {
+  // Queued in BOTH modes: runFlush routes to Supabase when `persistent`,
+  // else to the localStorage fallback — either way the edit survives.
+  if (doc.kind === "prompt" || doc.kind === "snippet") {
     pending.set(id, { kind: doc.kind, body, regions, tokens })
     setSaveState(id, "dirty")
     scheduleFlush()
@@ -1226,9 +1301,11 @@ export async function deleteDoc(id: string): Promise<string[]> {
         : await supabase.from("snippets").delete().eq("id", id)
     if (res.error) throw res.error
   }
-  // A queued body write for this id must not fire against the deleted row.
+  // A queued body write for this id must not fire against the deleted row,
+  // and a fallback copy must not resurrect the body on the next hydrate.
   pending.delete(id)
   saveStates.delete(id)
+  removeKey(docKey(id))
 
   const removed = [id]
   if (doc.kind === "prompt") {

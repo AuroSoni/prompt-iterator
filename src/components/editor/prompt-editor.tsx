@@ -51,6 +51,7 @@ import { promptFolding, restoreFolds, saveFolds } from "@/lib/fold"
 import { promptLanguage } from "@/lib/language"
 import {
   createSnippetFromText,
+  flushPendingNow,
   getDoc,
   getSnippet,
   getSnippetBody,
@@ -173,6 +174,16 @@ export function PromptEditor({ docId }: { docId: string }) {
           // simplifySelection sees it. Handlers read refs: they outlive
           // renders but must observe current mode state.
           keymap.of([
+            {
+              // Force-save: skip the debounce and flush now (DB when
+              // persistent, localStorage otherwise). Returning true makes CM
+              // preventDefault, so the browser Save dialog never opens.
+              key: "Mod-s",
+              run: () => {
+                void flushPendingNow()
+                return true
+              },
+            },
             {
               key: "Alt-z",
               run: () => {
