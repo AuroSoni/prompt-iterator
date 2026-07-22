@@ -39,16 +39,18 @@ import {
 import { KindBadge } from "@/components/shell/editor-slot"
 import { ResizeHandle } from "@/components/ui/resize-handle"
 import {
+  useRowDnd,
+  useSectionRootDnd,
+  useSidebarDropMonitor,
+} from "@/components/shell/sidebar-dnd"
+import {
   INDENT_BASE,
   INDENT_STEP,
   docDragItem,
   folderDragItem,
-  useRowDnd,
-  useSectionRootDnd,
-  useSidebarDropMonitor,
   type DragItem,
   type TreeDropEvent,
-} from "@/components/shell/sidebar-dnd"
+} from "@/components/shell/sidebar-tree"
 import {
   bySortOrder,
   fmtTokens,
