@@ -11,6 +11,12 @@ export type Flag = "ok" | "suspect" | "stale" | "revisit"
 
 export const FLAGS: Flag[] = ["ok", "suspect", "stale", "revisit"]
 
+/** CSS color for a flag. The --flag-* vars are scoped to .prompt-editor, so
+ *  consumers must render inside (or portal into) the editor container. */
+export function flagColor(flag: Flag): string {
+  return `var(--flag-${flag})`
+}
+
 /** A named, annotated span of the prompt. Regions may be ragged and text can
  *  exist outside any region — they are an overlay, not a partition. */
 export interface Region {
