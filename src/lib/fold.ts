@@ -27,10 +27,11 @@ const MAX_INDEX_LINES = 50_000
 
 const foldIndexCache = new WeakMap<Text, Map<number, number>>()
 
-const OPEN_TAG = /^<([A-Za-z][\w.-]*)(?:\s[^<>]*)?>/
-const CLOSE_TAG = /^<\/([A-Za-z][\w.-]*)\s*>/
-const SELF_CLOSING = /^<[A-Za-z][\w.-]*(?:\s[^<>]*)?\/>/
-const FENCE = /^\s*(```|~~~)/
+// Shared with the content outline (@/lib/outline) — one notion of "a tag".
+export const OPEN_TAG = /^<([A-Za-z][\w.-]*)(?:\s[^<>]*)?>/
+export const CLOSE_TAG = /^<\/([A-Za-z][\w.-]*)\s*>/
+export const SELF_CLOSING = /^<[A-Za-z][\w.-]*(?:\s[^<>]*)?\/>/
+export const FENCE = /^\s*(```|~~~)/
 
 interface OpenFrame {
   name: string // tag name, or "{" / "[" for brace frames

@@ -42,8 +42,16 @@ import {
   updateRegionEffect,
 } from "@/lib/editor"
 import type { Region, RegionInfo, RibbonMark } from "@/lib/editor"
-import { promptFolding, restoreFolds, saveFolds, unfoldAt } from "@/lib/fold"
+import {
+  promptFolding,
+  restoreFolds,
+  revealPos,
+  saveFolds,
+  unfoldAt,
+} from "@/lib/fold"
 import { promptLanguage } from "@/lib/language"
+import { outlineNodeAt, outlineNodes } from "@/lib/outline"
+import type { OutlineNode } from "@/lib/outline"
 import {
   createSnippetFromText,
   flushPendingNow,
@@ -152,6 +160,9 @@ interface Chrome {
   activeRegionText: string
   line: number
   col: number
+  /** Raw caret position — drives the outline's active-node highlight. */
+  caret: number
+  outline: OutlineNode[]
   marks: RibbonMark[]
   pill: { left: number; top: number } | null
   /** When the selection touches an existing region, the pill flips from
@@ -199,6 +210,8 @@ function readChrome(view: EditorView, host: HTMLElement): Chrome {
       : "",
     line: line.number,
     col: sel.head - line.from + 1,
+    caret: sel.head,
+    outline: outlineNodes(state.doc),
     marks: ribbonMarks(view),
     pill,
     pillEdit,
@@ -497,6 +510,12 @@ export function PromptEditor({ docId }: { docId: string }) {
     scrollToRegion(view, r)
   }, [])
 
+  // Outline navigation: unfold if hidden, center, focus.
+  const revealAt = useCallback((pos: number) => {
+    const view = viewRef.current
+    if (view) revealPos(view, pos)
+  }, [])
+
   const patchRegion = useCallback((id: string, patch: Partial<Region>) => {
     viewRef.current?.dispatch({ effects: updateRegionEffect.of({ id, patch }) })
   }, [])
@@ -730,9 +749,9 @@ export function PromptEditor({ docId }: { docId: string }) {
         {!zen && outlineVisible && (
           <>
             <Outline
-              regions={chrome?.regions ?? []}
-              activeRegionId={chrome?.activeRegionId ?? null}
-              onJump={jumpTo}
+              nodes={chrome?.outline ?? []}
+              caret={chrome?.caret ?? 0}
+              onReveal={revealAt}
               className="hidden shrink-0 border-r @5xl:block"
               // maxWidth mirrors the handle's maxFraction: a stored-wide pane
               // can't squeeze the editor when the slot narrows.
@@ -941,60 +960,62 @@ function ZenControls({
 
 // ---- Outline -------------------------------------------------------------
 
+// The prompt's content structure — markdown headings + XML tags as one nested
+// tree (see @/lib/outline). Regions live in the Inspector; this pane is about
+// the SHAPE of the document.
 function Outline({
-  regions,
-  activeRegionId,
-  onJump,
+  nodes,
+  caret,
+  onReveal,
   className,
   style,
 }: {
-  regions: RegionInfo[]
-  activeRegionId: string | null
-  onJump: (r: Region) => void
+  nodes: OutlineNode[]
+  caret: number
+  onReveal: (pos: number) => void
   className?: string
   style?: React.CSSProperties
 }) {
+  const active = outlineNodeAt(nodes, caret)
+  const rows: { node: OutlineNode; depth: number }[] = []
+  const walk = (ns: OutlineNode[], depth: number) => {
+    for (const n of ns) {
+      rows.push({ node: n, depth })
+      walk(n.children, depth + 1)
+    }
+  }
+  walk(nodes, 0)
+
   return (
     <nav className={cn("overflow-y-auto py-3", className)} style={style}>
       <h3 className="px-3 pb-2 text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
-        REGIONS
+        OUTLINE
       </h3>
-      {regions.length === 0 && (
+      {rows.length === 0 && (
         <p className="px-3 text-xs leading-relaxed text-muted-foreground">
-          No regions yet.
+          No structure detected.
         </p>
       )}
-      {regions.map((r) => {
-        const active = r.id === activeRegionId
+      {rows.map(({ node, depth }) => {
+        const isActive = node === active
         return (
           <button
-            key={r.id}
+            key={`${node.from}-${node.kind}-${node.label}`}
             type="button"
-            onClick={() => onJump(r)}
+            title={node.label}
+            onClick={() => onReveal(node.from)}
             className={cn(
-              "block w-full border-l-2 px-3 py-1.5 text-left",
-              active ? "bg-accent/60" : "border-l-transparent hover:bg-accent/40"
+              "block w-full truncate border-l-2 py-1 pr-2 text-left text-xs",
+              isActive
+                ? "border-l-primary bg-accent/60"
+                : "border-l-transparent hover:bg-accent/40",
+              node.kind === "tag"
+                ? "font-mono text-[11px]"
+                : node.level <= 2 && "font-medium"
             )}
-            style={active ? { borderLeftColor: flagColor(r.flag) } : undefined}
+            style={{ paddingLeft: 12 + depth * 12 }}
           >
-            <span className="flex items-center gap-1.5">
-              <span
-                className="size-1.5 shrink-0 rounded-full"
-                style={{ background: flagColor(r.flag) }}
-              />
-              <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                {r.name}
-              </span>
-              <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-                {r.tokens}t
-              </span>
-            </span>
-            <span className="mt-1 block h-0.5 overflow-hidden rounded bg-border">
-              <span
-                className="block h-full rounded"
-                style={{ width: `${r.pct}%`, background: flagColor(r.flag) }}
-              />
-            </span>
+            {node.kind === "tag" ? `<${node.label}>` : node.label}
           </button>
         )
       })}
