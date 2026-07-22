@@ -10,9 +10,10 @@ import {
   foldEffect,
   foldedRanges,
   foldService,
+  unfoldEffect,
 } from "@codemirror/language"
-import type { EditorState, Extension, Text } from "@codemirror/state"
-import type { EditorView } from "@codemirror/view"
+import type { EditorState, Extension, StateEffect, Text } from "@codemirror/state"
+import { EditorView } from "@codemirror/view"
 
 import { readJSON, removeKey, writeJSON } from "@/lib/local"
 
@@ -26,10 +27,11 @@ const MAX_INDEX_LINES = 50_000
 
 const foldIndexCache = new WeakMap<Text, Map<number, number>>()
 
-const OPEN_TAG = /^<([A-Za-z][\w.-]*)(?:\s[^<>]*)?>/
-const CLOSE_TAG = /^<\/([A-Za-z][\w.-]*)\s*>/
-const SELF_CLOSING = /^<[A-Za-z][\w.-]*(?:\s[^<>]*)?\/>/
-const FENCE = /^\s*(```|~~~)/
+// Shared with the content outline (@/lib/outline) — one notion of "a tag".
+export const OPEN_TAG = /^<([A-Za-z][\w.-]*)(?:\s[^<>]*)?>/
+export const CLOSE_TAG = /^<\/([A-Za-z][\w.-]*)\s*>/
+export const SELF_CLOSING = /^<[A-Za-z][\w.-]*(?:\s[^<>]*)?\/>/
+export const FENCE = /^\s*(```|~~~)/
 
 interface OpenFrame {
   name: string // tag name, or "{" / "[" for brace frames
@@ -135,6 +137,31 @@ export function promptFolding(): Extension {
     codeFolding({ placeholderText: "…" }),
     foldService.of(xmlBraceFold),
   ]
+}
+
+// ---- Reveal (unfold + navigate) ------------------------------------------
+
+/** Unfold every folded range overlapping [from, to]. A region can START just
+ *  before a fold (heading line visible, body collapsed), so point containment
+ *  is not enough — the whole target span must end up visible. */
+export function unfoldAt(view: EditorView, from: number, to: number = from): void {
+  const effects: StateEffect<{ from: number; to: number }>[] = []
+  foldedRanges(view.state).between(0, view.state.doc.length, (f, t) => {
+    if (f <= to && t >= from) effects.push(unfoldEffect.of({ from: f, to: t }))
+  })
+  if (effects.length > 0) view.dispatch({ effects })
+}
+
+/** Navigate to a position that may be hidden inside folds: unfold, then
+ *  center it. Used by the outline; region jumps compose unfoldAt with
+ *  scrollToRegion instead (regions want the start-anchored scroll). */
+export function revealPos(view: EditorView, pos: number): void {
+  unfoldAt(view, pos)
+  view.dispatch({
+    selection: { anchor: pos },
+    effects: EditorView.scrollIntoView(pos, { y: "center" }),
+  })
+  view.focus()
 }
 
 // ---- Fold persistence (localStorage, view-state only) --------------------

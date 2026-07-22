@@ -22,20 +22,13 @@ import {
 } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
 import { foldedRanges, foldGutter, foldKeymap } from "@codemirror/language"
-import {
-  ArrowDownToLine,
-  ArrowUpFromLine,
-  BookmarkPlus,
-  Lock,
-  PanelLeft,
-  PanelRight,
-  Trash2,
-} from "lucide-react"
+import { Lock, PanelLeft, PanelRight } from "lucide-react"
 
 import {
   addRegionEffect,
   approxTokens,
   FLAGS,
+  flagColor,
   regionAt,
   regionExtensions,
   regionInfos,
@@ -43,14 +36,22 @@ import {
   registerView,
   regionsOverlap,
   removeRegionEffect,
-  ribbonSegments,
+  ribbonMarks,
   scrollToRegion,
   unregisterView,
   updateRegionEffect,
 } from "@/lib/editor"
-import type { Flag, Region, RegionInfo, RibbonSegment } from "@/lib/editor"
-import { promptFolding, restoreFolds, saveFolds } from "@/lib/fold"
+import type { Region, RegionInfo, RibbonMark } from "@/lib/editor"
+import {
+  promptFolding,
+  restoreFolds,
+  revealPos,
+  saveFolds,
+  unfoldAt,
+} from "@/lib/fold"
 import { promptLanguage } from "@/lib/language"
+import { outlineNodeAt, outlineNodes } from "@/lib/outline"
+import type { OutlineNode } from "@/lib/outline"
 import {
   createSnippetFromText,
   flushPendingNow,
@@ -63,10 +64,9 @@ import {
   updateDocContent,
   updateSnippetFromRegion,
   updateSnippetNote,
-  useLibrary,
   useSaveState,
 } from "@/lib/library"
-import type { DocKind, SaveState, Snippet } from "@/lib/library"
+import type { SaveState } from "@/lib/library"
 import {
   dismissSnippetMatch,
   effectiveDismissals,
@@ -74,15 +74,19 @@ import {
 } from "@/lib/snippet-match"
 import type { MatchCandidate } from "@/lib/snippet-match"
 import { findExtension } from "@/lib/find"
+import { regionHover } from "@/lib/hover"
 import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
-import { Button } from "@/components/ui/button"
 import { FindBar } from "@/components/editor/find-bar"
+import { Inspector } from "@/components/editor/inspector"
+import { RegionPopover } from "@/components/editor/region-popover"
 import { ResizeHandle } from "@/components/ui/resize-handle"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
-
-function flagColor(flag: Flag): string {
-  return `var(--flag-${flag})`
-}
 
 // Cockpit-only CM extensions, swapped out (empty) while a slot is in Zen mode.
 // A single shared Compartment tag is safe across simultaneous views — each
@@ -156,8 +160,14 @@ interface Chrome {
   activeRegionText: string
   line: number
   col: number
-  segments: RibbonSegment[]
+  /** Raw caret position — drives the outline's active-node highlight. */
+  caret: number
+  outline: OutlineNode[]
+  marks: RibbonMark[]
   pill: { left: number; top: number } | null
+  /** When the selection touches an existing region, the pill flips from
+   *  "mark" to "edit" and targets this region. */
+  pillEdit: { id: string; name: string } | null
   viewport: { topPct: number; heightPct: number }
 }
 
@@ -165,8 +175,10 @@ function readChrome(view: EditorView, host: HTMLElement): Chrome {
   const state = view.state
   const sel = state.selection.main
   const line = state.doc.lineAt(sel.head)
+  const active = regionAt(state, sel.head)
 
   let pill: Chrome["pill"] = null
+  let pillEdit: Chrome["pillEdit"] = null
   if (!sel.empty) {
     const c = view.coordsAtPos(sel.head)
     if (c) {
@@ -176,11 +188,19 @@ function readChrome(view: EditorView, host: HTMLElement): Chrome {
         top: c.bottom - hostRect.top + 8,
       }
     }
+    // Head-in-region wins; otherwise any overlapped region is the edit target
+    // (marking over it is forbidden anyway — see regionsOverlap).
+    const hit =
+      active ??
+      state
+        .field(regionsField)
+        .find((r) => sel.from < r.to && sel.to > r.from) ??
+      null
+    if (hit) pillEdit = { id: hit.id, name: hit.name }
   }
 
   const sd = view.scrollDOM
   const scrollHeight = sd.scrollHeight || 1
-  const active = regionAt(state, sel.head)
   return {
     regions: regionInfos(state),
     totalTokens: approxTokens(state.doc.toString()),
@@ -190,8 +210,11 @@ function readChrome(view: EditorView, host: HTMLElement): Chrome {
       : "",
     line: line.number,
     col: sel.head - line.from + 1,
-    segments: ribbonSegments(state),
+    caret: sel.head,
+    outline: outlineNodes(state.doc),
+    marks: ribbonMarks(view),
     pill,
+    pillEdit,
     viewport: {
       topPct: (sd.scrollTop / scrollHeight) * 100,
       heightPct: Math.max(4, (sd.clientHeight / scrollHeight) * 100),
@@ -218,12 +241,22 @@ export function PromptEditor({ docId }: { docId: string }) {
   const [findOpen, setFindOpen] = useState(false)
   const [findReplace, setFindReplace] = useState(false)
   const [docEpoch, setDocEpoch] = useState(0)
+  // Region popover: target region id + frozen open-time anchor coords
+  // (host-relative). Coords are frozen so the popover doesn't chase the caret.
+  const [popover, setPopover] = useState<{
+    id: string
+    left: number
+    top: number
+  } | null>(null)
   // Zen ribbon is scroll-reactive: hot while scrolling, fades shortly after.
   const [ribbonHot, setRibbonHot] = useState(false)
   // Refs mirror mode state for CM keymap handlers created once at mount.
   const zenRef = useRef(zen)
   const xrayRef = useRef(xray)
   const findOpenRef = useRef(findOpen)
+  const popoverRef = useRef(popover)
+  const popoverOpenedAt = useRef(0)
+  const openPopoverRef = useRef<() => boolean>(() => false)
 
   useEffect(() => {
     const mount = mountRef.current
@@ -280,6 +313,12 @@ export function PromptEditor({ docId }: { docId: string }) {
               },
             },
             {
+              // Ctrl+M: annotate at the caret — edit the region under it,
+              // or mark the selection and open the popover on it.
+              key: "Mod-m",
+              run: () => openPopoverRef.current(),
+            },
+            {
               key: "Alt-z",
               run: () => {
                 setZen((z) => !z)
@@ -332,6 +371,7 @@ export function PromptEditor({ docId }: { docId: string }) {
           // After regions so find marks nest inside region tints (find bg on
           // top); current-match is opaque and wins regardless.
           findExtension(),
+          regionHover(),
           EditorView.updateListener.of((u) => {
             const hasEffects = u.transactions.some((t) => t.effects.length > 0)
             // The store write triggers on doc edits and REGION effects only.
@@ -379,8 +419,9 @@ export function PromptEditor({ docId }: { docId: string }) {
     })
     viewRef.current = view
     setView(view)
-    // Close any find bar left open from a previous doc in this slot.
+    // Close any find bar / region popover left open from a previous doc.
     setFindOpen(false)
+    setPopover(null)
     registerView(docId, view)
     restoreFolds(view, docId)
     // Scan on open: content that arrived while this prompt was closed (or
@@ -389,6 +430,12 @@ export function PromptEditor({ docId }: { docId: string }) {
     let ribbonFade = 0
     const onScroll = () => {
       schedule(view)
+      // The popover anchor is frozen in host coords; scrolling moves the text
+      // out from under it, so close. Grace period: opening can itself nudge
+      // the scroll position.
+      if (popoverRef.current && Date.now() - popoverOpenedAt.current > 300) {
+        setPopover(null)
+      }
       if (zenRef.current) {
         setRibbonHot(true)
         window.clearTimeout(ribbonFade)
@@ -414,6 +461,24 @@ export function PromptEditor({ docId }: { docId: string }) {
   useEffect(() => {
     findOpenRef.current = findOpen
   }, [findOpen])
+
+  useEffect(() => {
+    popoverRef.current = popover
+    if (popover) popoverOpenedAt.current = Date.now()
+  }, [popover])
+
+  // Close the popover if its region vanishes underneath it (undo, remove).
+  // Checked against LIVE CM state, not the chrome snapshot: right after
+  // mark-then-open the rAF-batched snapshot doesn't contain the new region
+  // yet, and closing on that stale read would flash the popover shut.
+  useEffect(() => {
+    if (!popover) return
+    const view = viewRef.current
+    if (!view) return
+    if (!view.state.field(regionsField).some((r) => r.id === popover.id)) {
+      setPopover(null)
+    }
+  }, [popover, chrome])
 
   // Mode switches reconfigure the SAME view — cursor, undo history, scroll
   // position, and regions all survive the toggle.
@@ -444,7 +509,17 @@ export function PromptEditor({ docId }: { docId: string }) {
 
   const jumpTo = useCallback((r: Region) => {
     const view = viewRef.current
-    if (view) scrollToRegion(view, r)
+    if (!view) return
+    // The region may sit (partly) inside collapsed folds (ribbon/list
+    // clicks) — unfold its whole span so the scroll lands on visible text.
+    unfoldAt(view, r.from, r.to)
+    scrollToRegion(view, r)
+  }, [])
+
+  // Outline navigation: unfold if hidden, center, focus.
+  const revealAt = useCallback((pos: number) => {
+    const view = viewRef.current
+    if (view) revealPos(view, pos)
   }, [])
 
   const patchRegion = useCallback((id: string, patch: Partial<Region>) => {
@@ -475,13 +550,15 @@ export function PromptEditor({ docId }: { docId: string }) {
   // synchronously (so it maps through any edits during the await), then — inside a
   // prompt — a snippet is created and its id attached. Marking inside a snippet
   // stays a plain local region (flat v1). Failure leaves it unlinked.
-  const markSelection = useCallback(async () => {
+  // Returns the new region's id synchronously (the popover opens on it while
+  // the snippet link resolves in the background).
+  const markSelection = useCallback((): string | null => {
     const view = viewRef.current
-    if (!view) return
+    if (!view) return null
     const { from, to } = view.state.selection.main
-    if (from === to) return
+    if (from === to) return null
     // Overlapping regions make "which snippet owns this text" ambiguous.
-    if (regionsOverlap(view.state.field(regionsField), from, to)) return
+    if (regionsOverlap(view.state.field(regionsField), from, to)) return null
     const id = `r${Date.now().toString(36)}`
     const text = view.state.doc.sliceString(from, to)
     view.dispatch({
@@ -496,24 +573,64 @@ export function PromptEditor({ docId }: { docId: string }) {
       selection: { anchor: to },
     })
     view.focus()
-    if (getDoc(docId)?.kind !== "prompt") return
-    try {
-      const { id: snippetId, version } = await createSnippetFromText(
-        "new-region",
-        text
-      )
-      viewRef.current?.dispatch({
-        effects: updateRegionEffect.of({
-          id,
-          patch: { snippetId, syncedVersion: version },
-        }),
-      })
-    } catch (e) {
-      reportError(
-        e instanceof Error ? e.message : "Couldn't create the snippet."
-      )
+    if (getDoc(docId)?.kind === "prompt") {
+      void (async () => {
+        try {
+          const { id: snippetId, version } = await createSnippetFromText(
+            "new-region",
+            text
+          )
+          viewRef.current?.dispatch({
+            effects: updateRegionEffect.of({
+              id,
+              patch: { snippetId, syncedVersion: version },
+            }),
+          })
+        } catch (e) {
+          reportError(
+            e instanceof Error ? e.message : "Couldn't create the snippet."
+          )
+        }
+      })()
     }
+    return id
   }, [docId])
+
+  // Open the mark/edit popover at the caret: an existing region under the
+  // head (or overlapped by the selection) is edited; a plain selection is
+  // marked first, then annotated. Always returns true — it doubles as the
+  // Mod-m keymap handler and must consume the keystroke either way.
+  const openRegionPopover = useCallback((): boolean => {
+    const view = viewRef.current
+    const host = hostRef.current
+    if (!view || !host || getDoc(docId)?.readOnly) return true
+    const sel = view.state.selection.main
+    const hit =
+      regionAt(view.state, sel.head) ??
+      view.state
+        .field(regionsField)
+        .find((r) => sel.from < r.to && sel.to > r.from) ??
+      null
+    let id = hit?.id ?? null
+    if (!id) {
+      if (sel.empty) return true
+      id = markSelection()
+      if (!id) return true
+    }
+    const c = view.coordsAtPos(sel.head)
+    if (!c) return true
+    const hostRect = host.getBoundingClientRect()
+    setPopover({
+      id,
+      left: Math.max(4, Math.min(c.left - hostRect.left, hostRect.width - 130)),
+      top: c.bottom - hostRect.top + 8,
+    })
+    return true
+  }, [docId, markSelection])
+
+  useEffect(() => {
+    openPopoverRef.current = openRegionPopover
+  }, [openRegionPopover])
 
   // Pull: replace the region's text with the snippet's canonical body and sync
   // its version. One transaction — the doc change collapses the old span, and the
@@ -622,8 +739,9 @@ export function PromptEditor({ docId }: { docId: string }) {
     )
   }
 
-  const activeRegion =
-    chrome?.regions.find((r) => r.id === chrome.activeRegionId) ?? null
+  const popoverRegion = popover
+    ? (chrome?.regions.find((r) => r.id === popover.id) ?? null)
+    : null
 
   return (
     <div
@@ -637,9 +755,9 @@ export function PromptEditor({ docId }: { docId: string }) {
         {!zen && outlineVisible && (
           <>
             <Outline
-              regions={chrome?.regions ?? []}
-              activeRegionId={chrome?.activeRegionId ?? null}
-              onJump={jumpTo}
+              nodes={chrome?.outline ?? []}
+              caret={chrome?.caret ?? 0}
+              onReveal={revealAt}
               className="hidden shrink-0 border-r @5xl:block"
               // maxWidth mirrors the handle's maxFraction: a stored-wide pane
               // can't squeeze the editor when the slot narrows.
@@ -670,9 +788,10 @@ export function PromptEditor({ docId }: { docId: string }) {
             )}
           />
           <Ribbon
-            segments={chrome?.segments ?? []}
+            marks={chrome?.marks ?? []}
             viewport={chrome?.viewport ?? null}
             onJump={jumpTo}
+            container={hostRef.current}
             className={cn(
               zen &&
                 "top-12 border-transparent bg-transparent transition-opacity duration-500",
@@ -705,7 +824,7 @@ export function PromptEditor({ docId }: { docId: string }) {
               Alt+X x-ray · Esc exit
             </div>
           )}
-          {!doc.readOnly && chrome?.pill && (
+          {!doc.readOnly && chrome?.pill && !popover && (
             <button
               type="button"
               className="absolute z-10 rounded-md border border-ring bg-card px-2.5 py-1 text-[11px] font-medium shadow-sm hover:bg-accent"
@@ -713,11 +832,32 @@ export function PromptEditor({ docId }: { docId: string }) {
               // mousedown, not click: keep the editor selection alive.
               onMouseDown={(e) => {
                 e.preventDefault()
-                markSelection()
+                openRegionPopover()
               }}
             >
-              + Mark region
+              {chrome.pillEdit ? (
+                <span className="flex max-w-44 items-center gap-1">
+                  ✎
+                  <span className="truncate font-mono">
+                    {chrome.pillEdit.name}
+                  </span>
+                </span>
+              ) : (
+                "+ Mark region"
+              )}
             </button>
+          )}
+          {popover && popoverRegion && (
+            <RegionPopover
+              key={popover.id}
+              region={popoverRegion}
+              anchor={popover}
+              container={hostRef.current}
+              onPatch={patchRegion}
+              onRemove={removeRegion}
+              onClose={() => setPopover(null)}
+              onRestoreFocus={() => viewRef.current?.focus()}
+            />
           )}
         </div>
 
@@ -737,11 +877,13 @@ export function PromptEditor({ docId }: { docId: string }) {
               className="-mx-0.5 hidden @3xl:block"
             />
             <Inspector
-              region={activeRegion}
-              regionText={chrome?.activeRegionText ?? ""}
+              regions={chrome?.regions ?? []}
+              activeRegionId={chrome?.activeRegionId ?? null}
+              activeRegionText={chrome?.activeRegionText ?? ""}
               docId={docId}
               docKind={doc.kind}
               readOnly={doc.readOnly}
+              onJump={jumpTo}
               onPatch={patchRegion}
               onRemove={removeRegion}
               onPull={pullRegion}
@@ -825,60 +967,62 @@ function ZenControls({
 
 // ---- Outline -------------------------------------------------------------
 
+// The prompt's content structure — markdown headings + XML tags as one nested
+// tree (see @/lib/outline). Regions live in the Inspector; this pane is about
+// the SHAPE of the document.
 function Outline({
-  regions,
-  activeRegionId,
-  onJump,
+  nodes,
+  caret,
+  onReveal,
   className,
   style,
 }: {
-  regions: RegionInfo[]
-  activeRegionId: string | null
-  onJump: (r: Region) => void
+  nodes: OutlineNode[]
+  caret: number
+  onReveal: (pos: number) => void
   className?: string
   style?: React.CSSProperties
 }) {
+  const active = outlineNodeAt(nodes, caret)
+  const rows: { node: OutlineNode; depth: number }[] = []
+  const walk = (ns: OutlineNode[], depth: number) => {
+    for (const n of ns) {
+      rows.push({ node: n, depth })
+      walk(n.children, depth + 1)
+    }
+  }
+  walk(nodes, 0)
+
   return (
     <nav className={cn("overflow-y-auto py-3", className)} style={style}>
       <h3 className="px-3 pb-2 text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
-        REGIONS
+        OUTLINE
       </h3>
-      {regions.length === 0 && (
+      {rows.length === 0 && (
         <p className="px-3 text-xs leading-relaxed text-muted-foreground">
-          No regions yet.
+          No structure detected.
         </p>
       )}
-      {regions.map((r) => {
-        const active = r.id === activeRegionId
+      {rows.map(({ node, depth }) => {
+        const isActive = node === active
         return (
           <button
-            key={r.id}
+            key={`${node.from}-${node.kind}-${node.label}`}
             type="button"
-            onClick={() => onJump(r)}
+            title={node.label}
+            onClick={() => onReveal(node.from)}
             className={cn(
-              "block w-full border-l-2 px-3 py-1.5 text-left",
-              active ? "bg-accent/60" : "border-l-transparent hover:bg-accent/40"
+              "block w-full truncate border-l-2 py-1 pr-2 text-left text-xs",
+              isActive
+                ? "border-l-primary bg-accent/60"
+                : "border-l-transparent hover:bg-accent/40",
+              node.kind === "tag"
+                ? "font-mono text-[11px]"
+                : node.level <= 2 && "font-medium"
             )}
-            style={active ? { borderLeftColor: flagColor(r.flag) } : undefined}
+            style={{ paddingLeft: 12 + depth * 12 }}
           >
-            <span className="flex items-center gap-1.5">
-              <span
-                className="size-1.5 shrink-0 rounded-full"
-                style={{ background: flagColor(r.flag) }}
-              />
-              <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                {r.name}
-              </span>
-              <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-                {r.tokens}t
-              </span>
-            </span>
-            <span className="mt-1 block h-0.5 overflow-hidden rounded bg-border">
-              <span
-                className="block h-full rounded"
-                style={{ width: `${r.pct}%`, background: flagColor(r.flag) }}
-              />
-            </span>
+            {node.kind === "tag" ? `<${node.label}>` : node.label}
           </button>
         )
       })}
@@ -889,408 +1033,81 @@ function Outline({
 // ---- Ribbon (structure minimap) ------------------------------------------
 
 function Ribbon({
-  segments,
+  marks,
   viewport,
   onJump,
+  container,
   className,
 }: {
-  segments: RibbonSegment[]
+  marks: RibbonMark[]
   viewport: { topPct: number; heightPct: number } | null
   onJump: (r: Region) => void
+  /** Tooltip portal target (the editor container, for scoped CSS vars). */
+  container: HTMLElement | null
   className?: string
 }) {
   return (
-    <div
-      className={cn(
-        // top/bottom (not inset-y) so a zen `top-12` override merges cleanly.
-        "absolute top-2 right-1 bottom-2 w-2 overflow-hidden rounded-sm border bg-muted/40",
-        className
-      )}
-    >
-      {segments.map((s, i) =>
-        s.region ? (
-          <button
-            key={s.region.id}
-            type="button"
-            title={s.region.name}
-            onClick={() => onJump(s.region!)}
-            className="block w-full opacity-80 hover:opacity-100"
-            style={{ height: `${s.pct}%`, background: flagColor(s.region.flag) }}
-          />
-        ) : (
-          <div key={`gap-${i}`} style={{ height: `${s.pct}%` }} />
-        )
-      )}
-      {viewport && (
-        <div
-          className="pointer-events-none absolute inset-x-0 rounded-[2px] border border-foreground/40 bg-foreground/10"
-          style={{
-            top: `${viewport.topPct}%`,
-            height: `${viewport.heightPct}%`,
-          }}
-        />
-      )}
-    </div>
-  )
-}
-
-// ---- Inspector -----------------------------------------------------------
-
-// The region↔snippet link panel: shows the linked snippet's name, usage, and
-// version, and the region's sync state (in sync / update available / local
-// edits / diverged) with the matching pull / push / promote actions. An
-// unlinked (or dangling) region gets a "make reusable" affordance instead.
-function SnippetLink({
-  region,
-  regionText,
-  snippet,
-  readOnly,
-  onPull,
-  onPush,
-  onPromote,
-  onMakeReusable,
-}: {
-  region: RegionInfo
-  regionText: string
-  snippet: Snippet | undefined
-  readOnly: boolean
-  onPull: (region: Region) => void
-  onPush: (region: Region) => void
-  onPromote: (region: Region) => void
-  onMakeReusable: (region: Region) => void
-}) {
-  // Unlinked, or dangling after its snippet was deleted: offer to (re)link.
-  if (!region.snippetId || !snippet) {
-    return readOnly ? null : (
-      <Button
-        size="sm"
-        variant="outline"
-        onClick={() => onMakeReusable(region)}
-        className="h-7 w-full justify-center gap-1.5 text-[11px]"
+    <TooltipProvider delayDuration={300}>
+      <div
+        className={cn(
+          // top/bottom (not inset-y) so a zen `top-12` override merges cleanly.
+          "absolute top-2 right-1 bottom-2 w-2 overflow-hidden rounded-sm border bg-muted/40",
+          className
+        )}
       >
-        <BookmarkPlus className="size-3.5" /> Make reusable snippet
-      </Button>
-    )
-  }
-
-  const behind = (region.syncedVersion ?? 0) < snippet.version
-  const canonical = getSnippetBody(region.snippetId)
-  const diverged = canonical !== undefined && regionText !== canonical
-  const state = behind && diverged
-    ? "diverged"
-    : behind
-      ? "update"
-      : diverged
-        ? "local"
-        : "synced"
-  const label =
-    state === "synced"
-      ? "in sync"
-      : state === "update"
-        ? "update available"
-        : state === "local"
-          ? "local edits"
-          : "diverged"
-
-  return (
-    <div className="rounded-sm border bg-muted/30 p-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
-          {snippet.name}
-        </span>
-        <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-          v{snippet.version}
-        </span>
-      </div>
-      <div className="mt-0.5 text-[10px] text-muted-foreground">
-        snippet · used in {snippet.usedBy}{" "}
-        {snippet.usedBy === 1 ? "place" : "places"} · {label}
-      </div>
-      {/* One-way rollup: the snippet's own note, read-only here. To edit it,
-          open the snippet — the region's NOTE below stays prompt-local. */}
-      {snippet.note.trim() !== "" && (
-        <div className="mt-1.5 border-t pt-1.5">
-          <div className="text-[9px] font-semibold tracking-[0.12em] text-muted-foreground">
-            SNIPPET NOTE
-          </div>
-          <p className="mt-0.5 text-[11px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
-            {snippet.note}
-          </p>
-        </div>
-      )}
-      {!readOnly && (state !== "synced" || !snippet.library) && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {(state === "update" || state === "diverged") && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                if (
-                  state === "diverged" &&
-                  !window.confirm(
-                    "Pull replaces this region's local edits with the snippet's current text. Continue?"
-                  )
-                )
-                  return
-                onPull(region)
-              }}
-              className="h-7 gap-1 text-[11px]"
+        {marks.map((m) => (
+          // max() floor: a region collapsed into a fold still renders a
+          // clickable sliver instead of vanishing.
+          <Tooltip key={m.region.id}>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => onJump(m.region)}
+                className="absolute inset-x-0 block opacity-80 hover:opacity-100"
+                style={{
+                  top: `${m.topPct}%`,
+                  height: `max(3px, ${m.heightPct}%)`,
+                  background: flagColor(m.region.flag),
+                }}
+              />
+            </TooltipTrigger>
+            <TooltipContent
+              container={container}
+              side="left"
+              className="flex-col items-start gap-1"
             >
-              <ArrowDownToLine className="size-3.5" />
-              {state === "diverged" ? "Pull" : `Update to v${snippet.version}`}
-            </Button>
-          )}
-          {(state === "local" || state === "diverged") && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => onPush(region)}
-              className="h-7 gap-1 text-[11px]"
-            >
-              <ArrowUpFromLine className="size-3.5" /> Save as v
-              {snippet.version + 1}
-            </Button>
-          )}
-          {!snippet.library && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => onPromote(region)}
-              className="h-7 gap-1 text-[11px]"
-            >
-              <BookmarkPlus className="size-3.5" /> Add to library
-            </Button>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// Doc-level panel shown when the SNIPPET ITSELF is open and no region is
-// active: identity, live usage, and the snippet's own note — the source of
-// the one-way rollup that prompt inspectors render read-only.
-function SnippetDocPanel({
-  snippet,
-  readOnly,
-  onUpdateNote,
-}: {
-  snippet: Snippet
-  readOnly: boolean
-  onUpdateNote: (snippetId: string, note: string) => void
-}) {
-  return (
-    <div className="mt-3 space-y-4">
-      <div className="rounded-sm border bg-muted/30 p-2">
-        <div className="flex items-center justify-between gap-2">
-          <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
-            {snippet.name}
-          </span>
-          <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-            v{snippet.version}
-          </span>
-        </div>
-        <div className="mt-0.5 text-[10px] text-muted-foreground">
-          used in {snippet.usedBy} {snippet.usedBy === 1 ? "place" : "places"}
-          {snippet.stale > 0 && <> · {snippet.stale} behind</>}
-        </div>
-      </div>
-      <div>
-        <div className="mb-1.5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground">
-          NOTE — WHY THIS EXISTS
-        </div>
-        {/* Uncontrolled + keyed by the committed value: remounts on external
-            change; can't fire mid-typing (only this textarea edits the note). */}
-        <textarea
-          key={snippet.note}
-          defaultValue={snippet.note}
-          disabled={readOnly}
-          onBlur={(e) => {
-            if (e.target.value !== snippet.note)
-              onUpdateNote(snippet.id, e.target.value)
-          }}
-          aria-label="Snippet note"
-          className="min-h-24 w-full resize-y rounded-sm border bg-background p-2 text-xs leading-relaxed focus:border-ring focus:outline-none disabled:opacity-70"
-        />
-      </div>
-    </div>
-  )
-}
-
-function Inspector({
-  region,
-  regionText,
-  docId,
-  docKind,
-  readOnly,
-  onPatch,
-  onRemove,
-  onPull,
-  onPush,
-  onPromote,
-  onMakeReusable,
-  onUpdateSnippetNote,
-  className,
-  style,
-}: {
-  region: RegionInfo | null
-  regionText: string
-  docId: string
-  docKind: DocKind
-  readOnly: boolean
-  onPatch: (id: string, patch: Partial<Region>) => void
-  onRemove: (id: string) => void
-  onPull: (region: Region) => void
-  onPush: (region: Region) => void
-  onPromote: (region: Region) => void
-  onMakeReusable: (region: Region) => void
-  onUpdateSnippetNote: (snippetId: string, note: string) => void
-  className?: string
-  style?: React.CSSProperties
-}) {
-  // Subscribe so the link panel reflects live snippet version/usage counts.
-  const lib = useLibrary()
-  const snippet =
-    region?.snippetId != null
-      ? lib.snippets.find((s) => s.id === region.snippetId)
-      : undefined
-  // A snippet doc's id IS its snippet id (docs.set(sr.id, …) on hydrate).
-  const self =
-    docKind === "snippet" ? lib.snippets.find((s) => s.id === docId) : undefined
-
-  return (
-    <aside className={cn("overflow-y-auto p-4", className)} style={style}>
-      <h3 className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
-        INSPECTOR
-      </h3>
-      {!region ? (
-        self ? (
-          <SnippetDocPanel
-            snippet={self}
-            readOnly={readOnly}
-            onUpdateNote={onUpdateSnippetNote}
-          />
-        ) : (
-          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-            Place the cursor inside a region
-            {readOnly ? "." : ", or select text and mark a new one."}
-          </p>
-        )
-      ) : (
-        // Key by region id: uncontrolled fields reset when the region changes,
-        // but survive re-renders while typing (the prototype's dirty-tracking).
-        <div key={region.id} className="mt-3 space-y-4">
-          <input
-            defaultValue={region.name}
-            disabled={readOnly}
-            onBlur={(e) => {
-              const name = e.target.value.trim()
-              if (name && name !== region.name) onPatch(region.id, { name })
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="size-1.5 shrink-0 rounded-full"
+                  style={{ background: flagColor(m.region.flag) }}
+                />
+                <span className="font-mono font-semibold">{m.region.name}</span>
+                <span
+                  className="text-[9px] font-semibold tracking-[0.12em] uppercase"
+                  style={{ color: flagColor(m.region.flag) }}
+                >
+                  {m.region.flag}
+                </span>
+              </span>
+              {m.region.note.trim().length > 0 && (
+                <span className="line-clamp-2 max-w-56 text-[11px] opacity-80">
+                  {m.region.note}
+                </span>
+              )}
+            </TooltipContent>
+          </Tooltip>
+        ))}
+        {viewport && (
+          <div
+            className="pointer-events-none absolute inset-x-0 rounded-[2px] border border-foreground/40 bg-foreground/10"
+            style={{
+              top: `${viewport.topPct}%`,
+              height: `${viewport.heightPct}%`,
             }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") e.currentTarget.blur()
-            }}
-            aria-label="Region name"
-            className="w-full rounded-sm border border-transparent bg-transparent px-1 py-0.5 font-mono text-[13px] font-semibold focus:border-input focus:outline-none disabled:opacity-70"
           />
-
-          <SnippetLink
-            region={region}
-            regionText={regionText}
-            snippet={snippet}
-            readOnly={readOnly}
-            onPull={onPull}
-            onPush={onPush}
-            onPromote={onPromote}
-            onMakeReusable={onMakeReusable}
-          />
-
-          <div>
-            <div className="mb-1.5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground">
-              FLAG
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {FLAGS.map((f) => {
-                const selected = region.flag === f
-                return (
-                  <button
-                    key={f}
-                    type="button"
-                    disabled={readOnly}
-                    onClick={() => onPatch(region.id, { flag: f })}
-                    className={cn(
-                      "rounded-sm border px-2 py-1 text-[10px] font-medium tracking-wide uppercase disabled:pointer-events-none disabled:opacity-50",
-                      !selected && "text-muted-foreground hover:bg-accent"
-                    )}
-                    style={
-                      selected
-                        ? {
-                            borderColor: flagColor(f),
-                            color: flagColor(f),
-                            background: `color-mix(in oklch, ${flagColor(f)} 10%, transparent)`,
-                          }
-                        : undefined
-                    }
-                  >
-                    {f}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
-          <div>
-            <div className="mb-1.5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground">
-              NOTE — WHY THIS EXISTS
-            </div>
-            <textarea
-              defaultValue={region.note}
-              disabled={readOnly}
-              onBlur={(e) => {
-                if (e.target.value !== region.note)
-                  onPatch(region.id, { note: e.target.value })
-              }}
-              aria-label="Region note"
-              className="min-h-24 w-full resize-y rounded-sm border bg-background p-2 text-xs leading-relaxed focus:border-ring focus:outline-none disabled:opacity-70"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-sm border bg-muted/40 p-2">
-              <div className="text-base font-bold tabular-nums">
-                {region.tokens}
-              </div>
-              <div className="mt-0.5 text-[9px] font-semibold tracking-[0.12em] text-muted-foreground">
-                TOKENS
-              </div>
-            </div>
-            <div className="rounded-sm border bg-muted/40 p-2">
-              <div className="text-base font-bold tabular-nums">
-                {region.pct}%
-              </div>
-              <div className="mt-0.5 text-[9px] font-semibold tracking-[0.12em] text-muted-foreground">
-                OF PROMPT
-              </div>
-            </div>
-          </div>
-
-          {/* Removing the annotation leaves the prose it covered in place. */}
-          {!readOnly && (
-            <div className="border-t pt-3">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onRemove(region.id)}
-                className="h-8 w-full justify-start gap-2 px-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
-              >
-                <Trash2 className="size-3.5" />
-                Remove region
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
-    </aside>
+        )}
+      </div>
+    </TooltipProvider>
   )
 }
 

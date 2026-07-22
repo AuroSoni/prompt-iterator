@@ -11,6 +11,12 @@ export type Flag = "ok" | "suspect" | "stale" | "revisit"
 
 export const FLAGS: Flag[] = ["ok", "suspect", "stale", "revisit"]
 
+/** CSS color for a flag. The --flag-* vars are scoped to .prompt-editor, so
+ *  consumers must render inside (or portal into) the editor container. */
+export function flagColor(flag: Flag): string {
+  return `var(--flag-${flag})`
+}
+
 /** A named, annotated span of the prompt. Regions may be ragged and text can
  *  exist outside any region — they are an overlay, not a partition. */
 export interface Region {
@@ -200,24 +206,31 @@ export function regionInfos(state: EditorState): RegionInfo[] {
   }))
 }
 
-/** Structure-ribbon math: full doc coverage as segments (regions + gaps). */
-export interface RibbonSegment {
-  region: Region | null
-  from: number
-  to: number
-  pct: number
+/** Structure-ribbon math: one marker per region, positioned by VISUAL block
+ *  geometry (not character proportion) so folds are respected. Percentages are
+ *  in the scroller's scroll space — the same basis the viewport indicator uses
+ *  (scrollTop/scrollHeight) — so markers and viewport can never diverge again.
+ *  A region inside a folded range collapses to its fold line's block; the
+ *  renderer applies a px floor to keep it visible. */
+export interface RibbonMark {
+  region: Region
+  topPct: number
+  heightPct: number
 }
 
-export function ribbonSegments(state: EditorState): RibbonSegment[] {
-  const len = Math.max(1, state.doc.length)
-  const segs: RibbonSegment[] = []
-  let cursor = 0
-  for (const r of state.field(regionsField)) {
-    if (r.from > cursor) segs.push({ region: null, from: cursor, to: r.from, pct: 0 })
-    segs.push({ region: r, from: r.from, to: r.to, pct: 0 })
-    cursor = Math.max(cursor, r.to)
-  }
-  if (cursor < len) segs.push({ region: null, from: cursor, to: len, pct: 0 })
-  for (const s of segs) s.pct = ((s.to - s.from) / len) * 100
-  return segs
+export function ribbonMarks(view: EditorView): RibbonMark[] {
+  const scrollHeight = view.scrollDOM.scrollHeight || 1
+  // lineBlockAt tops are relative to the first line; scroll space starts above
+  // the document padding. Offsetting by padding keeps the shared basis exact.
+  const pad = view.documentPadding.top
+  const len = view.state.doc.length
+  return view.state.field(regionsField).map((r) => {
+    const top = view.lineBlockAt(Math.min(r.from, len)).top
+    const bottom = view.lineBlockAt(Math.min(r.to, len)).bottom
+    return {
+      region: r,
+      topPct: ((pad + top) / scrollHeight) * 100,
+      heightPct: (Math.max(0, bottom - top) / scrollHeight) * 100,
+    }
+  })
 }
