@@ -954,6 +954,11 @@ export function getSnippetBody(id: string): string | undefined {
   return canonicalBody.get(id) ?? docs.get(id)?.body
 }
 
+/** Snapshot of all snippets for non-React callers (the auto-match scan). */
+export function listSnippets(): Snippet[] {
+  return snippets
+}
+
 /** The doc to open on a fresh workspace. Valid after hydrate() resolves. */
 export function firstPromptId(): string | null {
   return prompts[0]?.id ?? null

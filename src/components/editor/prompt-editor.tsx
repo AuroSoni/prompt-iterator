@@ -57,6 +57,7 @@ import {
   getDoc,
   getSnippet,
   getSnippetBody,
+  listSnippets,
   promoteSnippet,
   reportError,
   updateDocContent,
@@ -66,6 +67,12 @@ import {
   useSaveState,
 } from "@/lib/library"
 import type { DocKind, SaveState, Snippet } from "@/lib/library"
+import {
+  dismissSnippetMatch,
+  effectiveDismissals,
+  findSnippetMatches,
+} from "@/lib/snippet-match"
+import type { MatchCandidate } from "@/lib/snippet-match"
 import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
 import { Button } from "@/components/ui/button"
 import { ResizeHandle } from "@/components/ui/resize-handle"
@@ -97,6 +104,45 @@ const promptFoldGutter = foldGutter({
     return m
   },
 })
+
+/** Scan debounce — longer than the store's 500ms flush, so the scan never
+ *  fires mid-typing-burst. */
+const SCAN_DEBOUNCE_MS = 800
+
+/** One synchronous auto-match pass over a live prompt view: find unmarked
+ *  spans exactly equal to a snippet's canonical body and mark them as linked,
+ *  born-synced regions. One dispatch = one transaction = one updateDocContent
+ *  (linkSig changes → recomputeUsage → usedBy climbs, which is exactly how a
+ *  twice-pasted mark-created snippet surfaces in the sidebar). Idempotent via
+ *  the overlap guard, so StrictMode double-mounts are safe; the scan's own
+ *  effects-only dispatch never reschedules itself (scan runs on docChanged
+ *  only), so there is no loop. */
+function runSnippetScan(docId: string, view: EditorView): void {
+  const doc = getDoc(docId)
+  if (!doc || doc.kind !== "prompt" || doc.readOnly) return
+  const body = view.state.doc.toString()
+  const candidates: MatchCandidate[] = listSnippets().flatMap((s) => {
+    const canonical = getSnippetBody(s.id)
+    return canonical
+      ? [{ snippetId: s.id, name: s.name, version: s.version, body: canonical }]
+      : []
+  })
+  const skip = effectiveDismissals(docId, body, candidates)
+  const matches = findSnippetMatches(
+    body,
+    view.state.field(regionsField),
+    candidates.filter((c) => !skip.has(c.snippetId))
+  )
+  if (matches.length === 0) return
+  // The -i suffix avoids the id collision markSelection's bare timestamp
+  // pattern would hit on a multi-match batch.
+  const stamp = Date.now().toString(36)
+  view.dispatch({
+    effects: matches.map((m, i) =>
+      addRegionEffect.of({ id: `r${stamp}-${i}`, flag: "ok", note: "", ...m })
+    ),
+  })
+}
 
 /** Everything the React chrome needs, read from the CM state in one place. */
 interface Chrome {
@@ -175,6 +221,7 @@ export function PromptEditor({ docId }: { docId: string }) {
     if (!mount || !host || !initial) return
 
     let raf = 0
+    let scanTimer = 0
     const schedule = (view: EditorView) => {
       if (raf) return
       raf = requestAnimationFrame(() => {
@@ -275,6 +322,15 @@ export function PromptEditor({ docId }: { docId: string }) {
             if (u.docChanged || u.geometryChanged || u.selectionSet || hasEffects) {
               schedule(u.view)
             }
+            // Auto-match runs on TEXT changes only — the scan's own
+            // effects-only dispatch can't reschedule itself (no loop).
+            if (u.docChanged) {
+              window.clearTimeout(scanTimer)
+              scanTimer = window.setTimeout(
+                () => runSnippetScan(docId, u.view),
+                SCAN_DEBOUNCE_MS
+              )
+            }
           }),
         ],
       }),
@@ -282,6 +338,9 @@ export function PromptEditor({ docId }: { docId: string }) {
     viewRef.current = view
     registerView(docId, view)
     restoreFolds(view, docId)
+    // Scan on open: content that arrived while this prompt was closed (or
+    // before this feature shipped) gets marked the moment it's looked at.
+    runSnippetScan(docId, view)
     let ribbonFade = 0
     const onScroll = () => {
       schedule(view)
@@ -296,6 +355,7 @@ export function PromptEditor({ docId }: { docId: string }) {
 
     return () => {
       cancelAnimationFrame(raf)
+      window.clearTimeout(scanTimer)
       window.clearTimeout(ribbonFade)
       unregisterView(docId, view)
       viewRef.current = null
@@ -340,12 +400,24 @@ export function PromptEditor({ docId }: { docId: string }) {
   }, [])
 
   // Drop a region's annotation (name/flag/note); the prose it covered stays.
-  const removeRegion = useCallback((id: string) => {
-    const view = viewRef.current
-    if (!view) return
-    view.dispatch({ effects: removeRegionEffect.of(id) })
-    view.focus()
-  }, [])
+  const removeRegion = useCallback(
+    (id: string) => {
+      const view = viewRef.current
+      if (!view) return
+      // Removing a LINKED region in a prompt is a "stop marking this snippet
+      // here" signal — without the dismissal the auto-match scan would re-mark
+      // the still-matching text within a second. Hand-marked regions count
+      // too: their text equals the canonical by construction.
+      const region = view.state.field(regionsField).find((r) => r.id === id)
+      if (region?.snippetId && getDoc(docId)?.kind === "prompt") {
+        const snip = getSnippet(region.snippetId)
+        if (snip) dismissSnippetMatch(docId, region.snippetId, snip.version)
+      }
+      view.dispatch({ effects: removeRegionEffect.of(id) })
+      view.focus()
+    },
+    [docId]
+  )
 
   // Mark a span as a region. Region-first, link-on-resolve: the region is painted
   // synchronously (so it maps through any edits during the await), then — inside a
