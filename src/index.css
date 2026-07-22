@@ -253,6 +253,31 @@
 .prompt-editor .pi-flag-stale   { background: color-mix(in oklch, var(--flag-stale) 10%, transparent); }
 .prompt-editor .pi-flag-revisit { background: color-mix(in oklch, var(--flag-revisit) 10%, transparent); }
 
+/* Find & replace match highlighting. A 4th mark layer over region tints and
+   grammar tokens: the plain match is a translucent primary wash; the current
+   match is an opaque amber that wins over any nested tok-* foreground. */
+.prompt-editor .pi-find-match {
+    background: color-mix(in oklch, var(--primary) 22%, transparent);
+    border-radius: 2px;
+}
+.prompt-editor .pi-find-current {
+    background: var(--flag-suspect);
+    border-radius: 2px;
+}
+.prompt-editor .pi-find-current,
+.prompt-editor .pi-find-current .tok-heading,
+.prompt-editor .pi-find-current .tok-strong,
+.prompt-editor .pi-find-current .tok-emphasis,
+.prompt-editor .pi-find-current .tok-string,
+.prompt-editor .pi-find-current .tok-monospace,
+.prompt-editor .pi-find-current .tok-propertyName,
+.prompt-editor .pi-find-current .tok-typeName,
+.prompt-editor .pi-find-current .tok-number,
+.prompt-editor .pi-find-current .tok-atom,
+.prompt-editor .pi-find-current .pi-jinja {
+    color: var(--background);
+}
+
 /* Region name tag rendered above each region's first line. */
 .prompt-editor .pi-region-startline::before {
     content: "── " attr(data-rname) " ";
