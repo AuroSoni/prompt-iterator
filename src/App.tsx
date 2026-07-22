@@ -20,6 +20,7 @@ import {
   getDoc,
   getSnippet,
   getSnippetBody,
+  moveDoc,
   moveFolder,
   promoteSnippet,
   renameDoc,
@@ -206,6 +207,17 @@ function App() {
     []
   )
 
+  const handleMoveDoc = useCallback(
+    async (docId: string, folderId: string | null, index: number) => {
+      try {
+        await moveDoc(docId, folderId, index)
+      } catch (e) {
+        reportError(e instanceof Error ? e.message : "Couldn't move.")
+      }
+    },
+    []
+  )
+
   const handleSignOut = useCallback(() => {
     void signOut()
   }, [])
@@ -257,6 +269,7 @@ function App() {
           onRenameFolder={handleRenameFolder}
           onDeleteFolder={handleDeleteFolder}
           onMoveFolder={handleMoveFolder}
+          onMoveDoc={handleMoveDoc}
           onSignOut={isSupabaseConfigured ? handleSignOut : undefined}
         />
         <main className="min-w-0 flex-1">

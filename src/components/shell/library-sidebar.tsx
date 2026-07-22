@@ -39,8 +39,20 @@ import {
 import { KindBadge } from "@/components/shell/editor-slot"
 import { ResizeHandle } from "@/components/ui/resize-handle"
 import {
+  INDENT_BASE,
+  INDENT_STEP,
+  docDragItem,
+  folderDragItem,
+  useRowDnd,
+  useSectionRootDnd,
+  useSidebarDropMonitor,
+  type DragItem,
+  type TreeDropEvent,
+} from "@/components/shell/sidebar-dnd"
+import {
   bySortOrder,
   fmtTokens,
+  isSelfOrDescendant,
   useLibrary,
   type Folder,
   type FolderSection,
@@ -82,6 +94,7 @@ interface LibrarySidebarProps {
   onRenameFolder: (id: string, name: string) => void
   onDeleteFolder: (id: string) => void
   onMoveFolder: (id: string, parentId: string | null, index: number) => void
+  onMoveDoc: (docId: string, folderId: string | null, index: number) => void
   /** Present only when Supabase is configured (there's a session to end). */
   onSignOut?: () => void
 }
@@ -93,15 +106,25 @@ interface DeleteTarget {
   kind: "prompt" | "snippet" | "folder"
 }
 
-// ---- Tree geometry -------------------------------------------------------
-
-/** Per-level indent in px. The DnD hitbox's `indentPerLevel` must match. */
-export const INDENT_STEP = 16
-const INDENT_BASE = 8
+// ---- Tree geometry (constants shared with the DnD hitbox in sidebar-dnd) --
 
 const indentStyle = (depth: number) => ({
   paddingLeft: INDENT_BASE + depth * INDENT_STEP,
 })
+
+/** 2px insertion line for reorder-above/below, inset to the row's indent. */
+function DropLine({ edge, depth }: { edge: "top" | "bottom"; depth: number }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "pointer-events-none absolute right-1 h-0.5 rounded-full bg-primary",
+        edge === "top" ? "top-0" : "bottom-0"
+      )}
+      style={{ left: INDENT_BASE + depth * INDENT_STEP }}
+    />
+  )
+}
 
 // ---- Tree building (pure) ------------------------------------------------
 
@@ -167,6 +190,7 @@ function buildTree<
 
 interface RowProps {
   docId: string
+  section: FolderSection
   active: boolean
   open: boolean
   /** Tree nesting level; 0 = section root. */
@@ -178,9 +202,12 @@ interface RowProps {
   children: ReactNode
 }
 
-/** One clickable library row. Click opens in the active slot; ⊞ opens to the side. */
+/** One clickable library row. Click opens in the active slot; ⊞ opens to the side.
+ *  Draggable (reorder within a level, drop into folders) and a reorder target
+ *  for other docs of its section — never a parent (make-child blocked). */
 function Row({
   docId,
+  section,
   active,
   open,
   depth = 0,
@@ -189,8 +216,15 @@ function Row({
   actions,
   children,
 }: RowProps) {
+  const { setElement, dragging, instruction } = useRowDnd({
+    item: docDragItem(docId, section),
+    level: depth,
+    canDrop: (s) => s.type === "doc" && s.section === section && s.id !== docId,
+    block: ["make-child"],
+  })
   return (
     <div
+      ref={setElement}
       role="button"
       tabIndex={0}
       onClick={() => onOpen(docId)}
@@ -202,12 +236,19 @@ function Row({
       }}
       style={indentStyle(depth)}
       className={cn(
-        "group/row flex h-7 w-full cursor-pointer items-center gap-1.5 rounded-md pr-1 text-[13px] select-none",
+        "group/row relative flex h-7 w-full cursor-pointer items-center gap-1.5 rounded-md pr-1 text-[13px] select-none",
+        dragging && "opacity-50",
         active
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "hover:bg-sidebar-accent/60"
       )}
     >
+      {instruction?.type === "reorder-above" && (
+        <DropLine edge="top" depth={depth} />
+      )}
+      {instruction?.type === "reorder-below" && (
+        <DropLine edge="bottom" depth={depth} />
+      )}
       {children}
       <span
         className={cn(
@@ -387,7 +428,8 @@ interface FolderCallbacks {
 
 /** A folder header row plus (when expanded) its recursive contents. Not a
  *  `Row` — folders don't open in editor slots; the whole header toggles
- *  collapse instead. */
+ *  collapse instead. Draggable, and a drop target for same-section docs
+ *  (nest) and folders (nest/reorder; own subtree excluded). */
 function FolderNode<T extends { id: string }>({
   node,
   depth,
@@ -401,6 +443,24 @@ function FolderNode<T extends { id: string }>({
 }) {
   const { folder, childFolders, docs } = node
   const collapsed = callbacks.collapsedFolders.includes(folder.id)
+
+  const { setElement, dragging, instruction } = useRowDnd({
+    item: folderDragItem(folder.id, folder.section),
+    level: depth,
+    canDrop: (s) =>
+      s.section === folder.section &&
+      s.id !== folder.id &&
+      // A folder can't drop into itself or its own subtree (no indicator at all).
+      !(s.type === "folder" && isSelfOrDescendant(folder.id, s.id)),
+  })
+
+  // Hovering a make-child drop over a collapsed folder springs it open so the
+  // user can keep drilling. expandFolder is idempotent, so a re-fire is safe.
+  useEffect(() => {
+    if (instruction?.type !== "make-child" || !collapsed) return
+    const t = window.setTimeout(() => expandFolder(folder.id), 600)
+    return () => window.clearTimeout(t)
+  }, [instruction?.type, collapsed, folder.id])
 
   if (callbacks.editingId === folder.id) {
     return (
@@ -419,6 +479,7 @@ function FolderNode<T extends { id: string }>({
   return (
     <div>
       <div
+        ref={setElement}
         role="button"
         tabIndex={0}
         onClick={() => callbacks.onToggleCollapsed(folder.id)}
@@ -430,8 +491,19 @@ function FolderNode<T extends { id: string }>({
         }}
         aria-expanded={!collapsed}
         style={indentStyle(depth)}
-        className="group/row flex h-7 w-full cursor-pointer items-center gap-1.5 rounded-md pr-1 text-[13px] select-none hover:bg-sidebar-accent/60"
+        className={cn(
+          "group/row relative flex h-7 w-full cursor-pointer items-center gap-1.5 rounded-md pr-1 text-[13px] select-none hover:bg-sidebar-accent/60",
+          dragging && "opacity-50",
+          instruction?.type === "make-child" &&
+            "bg-primary/5 ring-1 ring-primary ring-inset"
+        )}
       >
+        {instruction?.type === "reorder-above" && (
+          <DropLine edge="top" depth={depth} />
+        )}
+        {instruction?.type === "reorder-below" && (
+          <DropLine edge="bottom" depth={depth} />
+        )}
         <ChevronRight
           className={cn(
             "size-3.5 shrink-0 text-muted-foreground transition-transform",
@@ -550,6 +622,7 @@ function PromptItem({
   return (
     <Row
       docId={prompt.id}
+      section="prompt"
       active={activeDocId === prompt.id}
       open={openDocIds.includes(prompt.id)}
       depth={depth}
@@ -618,6 +691,7 @@ function SnippetItem({
   return (
     <Row
       docId={snippet.id}
+      section="snippet"
       active={activeDocId === snippet.id}
       open={openDocIds.includes(snippet.id)}
       depth={depth}
@@ -688,6 +762,7 @@ export function LibrarySidebar({
   onRenameFolder,
   onDeleteFolder,
   onMoveFolder,
+  onMoveDoc,
   onSignOut,
 }: LibrarySidebarProps) {
   const { prompts, snippets, folders } = useLibrary()
@@ -740,6 +815,70 @@ export function LibrarySidebar({
     const id = await onCreateFolder(section, parentId)
     if (id) setEditingId(id)
   }
+
+  // ---- Drag-and-drop drop resolution -------------------------------------
+  // Indices are computed over the FULL store lists (hidden snippets included),
+  // by looking up the target's position among its siblings — never by visible
+  // row counting. The store ops re-validate section/cycle/self.
+  const promptSectionRef = useSectionRootDnd("prompt")
+  const snippetSectionRef = useSectionRootDnd("snippet")
+
+  const handleTreeDrop = ({ source, target, instruction }: TreeDropEvent) => {
+    if (source.id === target.id || source.section !== target.section) return
+    if (instruction.type === "make-child") {
+      if (target.type !== "folder") return
+      if (source.type === "doc") {
+        onMoveDoc(source.id, target.id, Number.MAX_SAFE_INTEGER)
+      } else {
+        onMoveFolder(source.id, target.id, Number.MAX_SAFE_INTEGER)
+      }
+      return
+    }
+    if (instruction.type !== "reorder-above" && instruction.type !== "reorder-below") {
+      return
+    }
+    const after = instruction.type === "reorder-below" ? 1 : 0
+    if (source.type === "folder") {
+      if (target.type !== "folder") return
+      const targetFolder = folders.find((f) => f.id === target.id)
+      if (!targetFolder) return
+      const siblings = folders
+        .filter(
+          (f) =>
+            f.section === targetFolder.section &&
+            f.parentId === targetFolder.parentId &&
+            f.id !== source.id
+        )
+        .sort(bySortOrder)
+      const idx = siblings.findIndex((f) => f.id === target.id)
+      if (idx === -1) return
+      onMoveFolder(source.id, targetFolder.parentId, idx + after)
+    } else {
+      if (target.type !== "doc") return
+      const list: Array<{ id: string; folderId: string | null; sortOrder: number }> =
+        source.section === "prompt" ? prompts : snippets
+      const targetDoc = list.find((d) => d.id === target.id)
+      if (!targetDoc) return
+      const siblings = list
+        .filter((d) => d.folderId === targetDoc.folderId && d.id !== source.id)
+        .sort(bySortOrder)
+      const idx = siblings.findIndex((d) => d.id === target.id)
+      if (idx === -1) return
+      onMoveDoc(source.id, targetDoc.folderId, idx + after)
+    }
+  }
+
+  useSidebarDropMonitor({
+    onTreeDrop: handleTreeDrop,
+    onRootDrop: (source: DragItem) => {
+      // Drop on a section's empty space: move to root, appended.
+      if (source.type === "doc") {
+        onMoveDoc(source.id, null, Number.MAX_SAFE_INTEGER)
+      } else {
+        onMoveFolder(source.id, null, Number.MAX_SAFE_INTEGER)
+      }
+    },
+  })
 
   const folderCallbacks: FolderCallbacks = {
     editingId,
@@ -843,16 +982,19 @@ export function LibrarySidebar({
         >
           Prompts
         </SectionHeader>
-        {promptTree.rootFolders.map((node) => (
-          <FolderNode
-            key={node.folder.id}
-            node={node}
-            depth={0}
-            renderDoc={renderPrompt}
-            callbacks={folderCallbacks}
-          />
-        ))}
-        {promptTree.rootDocs.map((p) => renderPrompt(p, 0))}
+        {/* Section container = the "empty space" drop target (move to root). */}
+        <div ref={promptSectionRef} className="pb-1">
+          {promptTree.rootFolders.map((node) => (
+            <FolderNode
+              key={node.folder.id}
+              node={node}
+              depth={0}
+              renderDoc={renderPrompt}
+              callbacks={folderCallbacks}
+            />
+          ))}
+          {promptTree.rootDocs.map((p) => renderPrompt(p, 0))}
+        </div>
 
         <SectionHeader
           onAdd={() => void newSnippet()}
@@ -868,16 +1010,18 @@ export function LibrarySidebar({
             No shared snippets yet. Mark a region in a prompt, then reuse it.
           </p>
         )}
-        {snippetTree.rootFolders.map((node) => (
-          <FolderNode
-            key={node.folder.id}
-            node={node}
-            depth={0}
-            renderDoc={renderSnippet}
-            callbacks={folderCallbacks}
-          />
-        ))}
-        {snippetTree.rootDocs.map((s) => renderSnippet(s, 0))}
+        <div ref={snippetSectionRef} className="pb-1">
+          {snippetTree.rootFolders.map((node) => (
+            <FolderNode
+              key={node.folder.id}
+              node={node}
+              depth={0}
+              renderDoc={renderSnippet}
+              callbacks={folderCallbacks}
+            />
+          ))}
+          {snippetTree.rootDocs.map((s) => renderSnippet(s, 0))}
+        </div>
       </nav>
 
       {onSignOut && (
