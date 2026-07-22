@@ -43,13 +43,13 @@ import {
   registerView,
   regionsOverlap,
   removeRegionEffect,
-  ribbonSegments,
+  ribbonMarks,
   scrollToRegion,
   unregisterView,
   updateRegionEffect,
 } from "@/lib/editor"
-import type { Flag, Region, RegionInfo, RibbonSegment } from "@/lib/editor"
-import { promptFolding, restoreFolds, saveFolds } from "@/lib/fold"
+import type { Flag, Region, RegionInfo, RibbonMark } from "@/lib/editor"
+import { promptFolding, restoreFolds, saveFolds, unfoldAt } from "@/lib/fold"
 import { promptLanguage } from "@/lib/language"
 import {
   createSnippetFromText,
@@ -156,7 +156,7 @@ interface Chrome {
   activeRegionText: string
   line: number
   col: number
-  segments: RibbonSegment[]
+  marks: RibbonMark[]
   pill: { left: number; top: number } | null
   viewport: { topPct: number; heightPct: number }
 }
@@ -190,7 +190,7 @@ function readChrome(view: EditorView, host: HTMLElement): Chrome {
       : "",
     line: line.number,
     col: sel.head - line.from + 1,
-    segments: ribbonSegments(state),
+    marks: ribbonMarks(view),
     pill,
     viewport: {
       topPct: (sd.scrollTop / scrollHeight) * 100,
@@ -444,7 +444,11 @@ export function PromptEditor({ docId }: { docId: string }) {
 
   const jumpTo = useCallback((r: Region) => {
     const view = viewRef.current
-    if (view) scrollToRegion(view, r)
+    if (!view) return
+    // The region may sit inside a collapsed fold (ribbon/list clicks) —
+    // unfold first so the start-anchored scroll lands on visible text.
+    unfoldAt(view, r.from)
+    scrollToRegion(view, r)
   }, [])
 
   const patchRegion = useCallback((id: string, patch: Partial<Region>) => {
@@ -670,7 +674,7 @@ export function PromptEditor({ docId }: { docId: string }) {
             )}
           />
           <Ribbon
-            segments={chrome?.segments ?? []}
+            marks={chrome?.marks ?? []}
             viewport={chrome?.viewport ?? null}
             onJump={jumpTo}
             className={cn(
@@ -889,12 +893,12 @@ function Outline({
 // ---- Ribbon (structure minimap) ------------------------------------------
 
 function Ribbon({
-  segments,
+  marks,
   viewport,
   onJump,
   className,
 }: {
-  segments: RibbonSegment[]
+  marks: RibbonMark[]
   viewport: { topPct: number; heightPct: number } | null
   onJump: (r: Region) => void
   className?: string
@@ -907,20 +911,22 @@ function Ribbon({
         className
       )}
     >
-      {segments.map((s, i) =>
-        s.region ? (
-          <button
-            key={s.region.id}
-            type="button"
-            title={s.region.name}
-            onClick={() => onJump(s.region!)}
-            className="block w-full opacity-80 hover:opacity-100"
-            style={{ height: `${s.pct}%`, background: flagColor(s.region.flag) }}
-          />
-        ) : (
-          <div key={`gap-${i}`} style={{ height: `${s.pct}%` }} />
-        )
-      )}
+      {marks.map((m) => (
+        // max() floor: a region collapsed into a fold still renders a
+        // clickable sliver instead of vanishing.
+        <button
+          key={m.region.id}
+          type="button"
+          title={m.region.name}
+          onClick={() => onJump(m.region)}
+          className="absolute inset-x-0 block opacity-80 hover:opacity-100"
+          style={{
+            top: `${m.topPct}%`,
+            height: `max(3px, ${m.heightPct}%)`,
+            background: flagColor(m.region.flag),
+          }}
+        />
+      ))}
       {viewport && (
         <div
           className="pointer-events-none absolute inset-x-0 rounded-[2px] border border-foreground/40 bg-foreground/10"

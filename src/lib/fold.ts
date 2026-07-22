@@ -10,9 +10,10 @@ import {
   foldEffect,
   foldedRanges,
   foldService,
+  unfoldEffect,
 } from "@codemirror/language"
-import type { EditorState, Extension, Text } from "@codemirror/state"
-import type { EditorView } from "@codemirror/view"
+import type { EditorState, Extension, StateEffect, Text } from "@codemirror/state"
+import { EditorView } from "@codemirror/view"
 
 import { readJSON, removeKey, writeJSON } from "@/lib/local"
 
@@ -135,6 +136,29 @@ export function promptFolding(): Extension {
     codeFolding({ placeholderText: "…" }),
     foldService.of(xmlBraceFold),
   ]
+}
+
+// ---- Reveal (unfold + navigate) ------------------------------------------
+
+/** Unfold every folded range containing `pos`. No-op when none do. */
+export function unfoldAt(view: EditorView, pos: number): void {
+  const effects: StateEffect<{ from: number; to: number }>[] = []
+  foldedRanges(view.state).between(0, view.state.doc.length, (from, to) => {
+    if (pos >= from && pos <= to) effects.push(unfoldEffect.of({ from, to }))
+  })
+  if (effects.length > 0) view.dispatch({ effects })
+}
+
+/** Navigate to a position that may be hidden inside folds: unfold, then
+ *  center it. Used by the outline; region jumps compose unfoldAt with
+ *  scrollToRegion instead (regions want the start-anchored scroll). */
+export function revealPos(view: EditorView, pos: number): void {
+  unfoldAt(view, pos)
+  view.dispatch({
+    selection: { anchor: pos },
+    effects: EditorView.scrollIntoView(pos, { y: "center" }),
+  })
+  view.focus()
 }
 
 // ---- Fold persistence (localStorage, view-state only) --------------------
