@@ -141,11 +141,13 @@ export function promptFolding(): Extension {
 
 // ---- Reveal (unfold + navigate) ------------------------------------------
 
-/** Unfold every folded range containing `pos`. No-op when none do. */
-export function unfoldAt(view: EditorView, pos: number): void {
+/** Unfold every folded range overlapping [from, to]. A region can START just
+ *  before a fold (heading line visible, body collapsed), so point containment
+ *  is not enough — the whole target span must end up visible. */
+export function unfoldAt(view: EditorView, from: number, to: number = from): void {
   const effects: StateEffect<{ from: number; to: number }>[] = []
-  foldedRanges(view.state).between(0, view.state.doc.length, (from, to) => {
-    if (pos >= from && pos <= to) effects.push(unfoldEffect.of({ from, to }))
+  foldedRanges(view.state).between(0, view.state.doc.length, (f, t) => {
+    if (f <= to && t >= from) effects.push(unfoldEffect.of({ from: f, to: t }))
   })
   if (effects.length > 0) view.dispatch({ effects })
 }

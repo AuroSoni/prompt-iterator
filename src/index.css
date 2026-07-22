@@ -281,7 +281,9 @@
 /* Region hover card (CM hoverTooltip — renders inside the editor, so the
    scoped --flag-* vars and theme tokens resolve in both themes). Read-only:
    editing lives in the selection popover and the Inspector. */
-.prompt-editor .cm-tooltip.pi-hover {
+/* CM wraps the returned dom in its own .cm-tooltip element (ours becomes a
+   .cm-tooltip-section child), so the card chrome targets the wrapper. */
+.prompt-editor .cm-tooltip:has(> .pi-hover) {
     max-width: 320px;
     padding: 8px 10px;
     border: 1px solid var(--border);

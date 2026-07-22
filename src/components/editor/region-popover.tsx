@@ -24,6 +24,7 @@ export function RegionPopover({
   onPatch,
   onRemove,
   onClose,
+  onRestoreFocus,
 }: {
   region: RegionInfo
   /** Frozen open-time coords, relative to the editor host (the render parent). */
@@ -33,6 +34,9 @@ export function RegionPopover({
   onPatch: (id: string, patch: Partial<Region>) => void
   onRemove: (id: string) => void
   onClose: () => void
+  /** Radix has no trigger to return focus to (the anchor is a bare span), so
+   *  the editor takes it back explicitly. */
+  onRestoreFocus: () => void
 }) {
   const nameRef = useRef<HTMLInputElement>(null)
   const noteRef = useRef<HTMLTextAreaElement>(null)
@@ -73,6 +77,10 @@ export function RegionPopover({
         onOpenAutoFocus={(e) => {
           e.preventDefault()
           noteRef.current?.focus()
+        }}
+        onCloseAutoFocus={(e) => {
+          e.preventDefault()
+          onRestoreFocus()
         }}
       >
         <input

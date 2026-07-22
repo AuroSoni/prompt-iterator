@@ -468,8 +468,14 @@ export function PromptEditor({ docId }: { docId: string }) {
   }, [popover])
 
   // Close the popover if its region vanishes underneath it (undo, remove).
+  // Checked against LIVE CM state, not the chrome snapshot: right after
+  // mark-then-open the rAF-batched snapshot doesn't contain the new region
+  // yet, and closing on that stale read would flash the popover shut.
   useEffect(() => {
-    if (popover && chrome && !chrome.regions.some((r) => r.id === popover.id)) {
+    if (!popover) return
+    const view = viewRef.current
+    if (!view) return
+    if (!view.state.field(regionsField).some((r) => r.id === popover.id)) {
       setPopover(null)
     }
   }, [popover, chrome])
@@ -504,9 +510,9 @@ export function PromptEditor({ docId }: { docId: string }) {
   const jumpTo = useCallback((r: Region) => {
     const view = viewRef.current
     if (!view) return
-    // The region may sit inside a collapsed fold (ribbon/list clicks) —
-    // unfold first so the start-anchored scroll lands on visible text.
-    unfoldAt(view, r.from)
+    // The region may sit (partly) inside collapsed folds (ribbon/list
+    // clicks) — unfold its whole span so the scroll lands on visible text.
+    unfoldAt(view, r.from, r.to)
     scrollToRegion(view, r)
   }, [])
 
@@ -850,6 +856,7 @@ export function PromptEditor({ docId }: { docId: string }) {
               onPatch={patchRegion}
               onRemove={removeRegion}
               onClose={() => setPopover(null)}
+              onRestoreFocus={() => viewRef.current?.focus()}
             />
           )}
         </div>
