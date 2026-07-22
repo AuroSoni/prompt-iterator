@@ -46,6 +46,7 @@ import {
   updateRegionEffect,
 } from "@/lib/editor"
 import type { Flag, Region, RegionInfo, RibbonSegment } from "@/lib/editor"
+import { promptLanguage } from "@/lib/language"
 import {
   createSnippetFromText,
   getDoc,
@@ -206,6 +207,7 @@ export function PromptEditor({ docId }: { docId: string }) {
           EditorView.lineWrapping,
           EditorState.readOnly.of(initial.readOnly),
           EditorView.editable.of(!initial.readOnly),
+          promptLanguage(),
           regionExtensions(initial.regions),
           EditorView.updateListener.of((u) => {
             const hasEffects = u.transactions.some((t) => t.effects.length > 0)
