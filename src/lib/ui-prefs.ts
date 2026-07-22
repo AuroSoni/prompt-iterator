@@ -121,6 +121,17 @@ export function toggleFolderCollapsed(id: string): void {
   })
 }
 
+/** Ensure a folder is expanded. Idempotent — callers that need "make visible"
+ *  (e.g. creating a subfolder inside a possibly-collapsed parent) must use
+ *  this, not a guard + toggle: a toggle driven by a stale render-time snapshot
+ *  can invert and collapse the folder instead. */
+export function expandFolder(id: string): void {
+  if (!prefs.collapsedFolders.includes(id)) return
+  setUiPrefs({
+    collapsedFolders: prefs.collapsedFolders.filter((x) => x !== id),
+  })
+}
+
 /** Drop ids of folders that no longer exist (deleted here or out-of-band).
  *  The sidebar runs this whenever the folder list changes. */
 export function pruneCollapsedFolders(live: ReadonlySet<string>): void {

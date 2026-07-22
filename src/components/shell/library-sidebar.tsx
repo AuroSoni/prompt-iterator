@@ -1,7 +1,12 @@
-import { useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import {
   BookmarkPlus,
+  ChevronRight,
+  CornerLeftUp,
+  Folder as FolderIcon,
+  FolderOpen,
+  FolderPlus,
   Import,
   LogOut,
   MoreHorizontal,
@@ -33,8 +38,23 @@ import {
 } from "@/components/ui/alert-dialog"
 import { KindBadge } from "@/components/shell/editor-slot"
 import { ResizeHandle } from "@/components/ui/resize-handle"
-import { fmtTokens, useLibrary, type Prompt } from "@/lib/library"
-import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
+import {
+  bySortOrder,
+  fmtTokens,
+  useLibrary,
+  type Folder,
+  type FolderSection,
+  type Prompt,
+  type Snippet,
+} from "@/lib/library"
+import {
+  UI_LIMITS,
+  expandFolder,
+  pruneCollapsedFolders,
+  setUiPrefs,
+  toggleFolderCollapsed,
+  useUiPrefs,
+} from "@/lib/ui-prefs"
 import { cn } from "@/lib/utils"
 
 interface LibrarySidebarProps {
@@ -54,25 +74,106 @@ interface LibrarySidebarProps {
   onInsertSnippet: (snippetId: string) => void
   /** Pin a mark-created snippet into the library list. */
   onPromoteSnippet: (snippetId: string) => void
+  /** Folder CRUD (await-first store ops; failures land on the shared banner). */
+  onCreateFolder: (
+    section: FolderSection,
+    parentId: string | null
+  ) => Promise<string | null>
+  onRenameFolder: (id: string, name: string) => void
+  onDeleteFolder: (id: string) => void
+  onMoveFolder: (id: string, parentId: string | null, index: number) => void
   /** Present only when Supabase is configured (there's a session to end). */
   onSignOut?: () => void
 }
 
-/** A prompt/snippet being confirmed for deletion. */
+/** A prompt/snippet/folder being confirmed for deletion. */
 interface DeleteTarget {
   id: string
   name: string
-  kind: "prompt" | "snippet"
+  kind: "prompt" | "snippet" | "folder"
+}
+
+// ---- Tree geometry -------------------------------------------------------
+
+/** Per-level indent in px. The DnD hitbox's `indentPerLevel` must match. */
+export const INDENT_STEP = 16
+const INDENT_BASE = 8
+
+const indentStyle = (depth: number) => ({
+  paddingLeft: INDENT_BASE + depth * INDENT_STEP,
+})
+
+// ---- Tree building (pure) ------------------------------------------------
+
+interface TreeNode<T> {
+  folder: Folder
+  childFolders: TreeNode<T>[]
+  docs: T[]
+}
+
+interface SectionTree<T> {
+  rootFolders: TreeNode<T>[]
+  rootDocs: T[]
+}
+
+/** Nest one section's flat folder/doc rows into a render tree. Defensive under
+ *  out-of-band edits: orphans (parent missing or in the other section) fall
+ *  back to the root, and corrupt parent cycles surface at the root rather than
+ *  disappearing. Pass snippets ALREADY filtered to the visible set — the
+ *  library filter applies inside folders too. */
+function buildTree<
+  T extends { id: string; folderId: string | null; sortOrder: number },
+>(allFolders: Folder[], sectionDocs: T[], section: FolderSection): SectionTree<T> {
+  const sectionFolders = allFolders.filter((f) => f.section === section)
+  const folderIds = new Set(sectionFolders.map((f) => f.id))
+  const childrenOf = new Map<string | null, Folder[]>()
+  for (const f of sectionFolders) {
+    const parent = f.parentId !== null && folderIds.has(f.parentId) ? f.parentId : null
+    childrenOf.set(parent, [...(childrenOf.get(parent) ?? []), f])
+  }
+  const docsOf = new Map<string | null, T[]>()
+  for (const d of sectionDocs) {
+    const parent = d.folderId !== null && folderIds.has(d.folderId) ? d.folderId : null
+    docsOf.set(parent, [...(docsOf.get(parent) ?? []), d])
+  }
+  const visited = new Set<string>()
+  const build = (parentId: string | null): TreeNode<T>[] =>
+    (childrenOf.get(parentId) ?? [])
+      .filter((f) => {
+        if (visited.has(f.id)) return false
+        visited.add(f.id)
+        return true
+      })
+      .sort(bySortOrder)
+      .map((folder) => ({
+        folder,
+        childFolders: build(folder.id),
+        docs: [...(docsOf.get(folder.id) ?? [])].sort(bySortOrder),
+      }))
+  const rootFolders = build(null)
+  // Folders inside a corrupt parent cycle are unreachable from the root walk;
+  // append them at the root so nothing silently vanishes.
+  for (const f of sectionFolders) {
+    if (visited.has(f.id)) continue
+    visited.add(f.id)
+    rootFolders.push({
+      folder: f,
+      childFolders: build(f.id),
+      docs: [...(docsOf.get(f.id) ?? [])].sort(bySortOrder),
+    })
+  }
+  return { rootFolders, rootDocs: [...(docsOf.get(null) ?? [])].sort(bySortOrder) }
 }
 
 interface RowProps {
   docId: string
   active: boolean
   open: boolean
-  indent?: boolean
+  /** Tree nesting level; 0 = section root. */
+  depth?: number
   onOpen: (docId: string) => void
   onOpenToSide: (docId: string) => void
-  /** Trailing per-row controls (e.g. the ⋯ menu). Absent on version rows. */
+  /** Trailing per-row controls (e.g. the ⋯ menu). */
   actions?: ReactNode
   children: ReactNode
 }
@@ -82,7 +183,7 @@ function Row({
   docId,
   active,
   open,
-  indent,
+  depth = 0,
   onOpen,
   onOpenToSide,
   actions,
@@ -99,9 +200,9 @@ function Row({
           onOpen(docId)
         }
       }}
+      style={indentStyle(depth)}
       className={cn(
         "group/row flex h-7 w-full cursor-pointer items-center gap-1.5 rounded-md pr-1 text-[13px] select-none",
-        indent ? "pl-8" : "pl-2",
         active
           ? "bg-sidebar-accent text-sidebar-accent-foreground"
           : "hover:bg-sidebar-accent/60"
@@ -178,13 +279,13 @@ function RowMenu({
  *  (and from overriding a cancel). */
 function InlineRenameRow({
   initial,
-  indent,
+  depth = 0,
   icon,
   onCommit,
   onCancel,
 }: {
   initial: string
-  indent?: boolean
+  depth?: number
   icon: ReactNode
   onCommit: (name: string) => void
   onCancel: () => void
@@ -193,10 +294,8 @@ function InlineRenameRow({
   const doneRef = useRef(false)
   return (
     <div
-      className={cn(
-        "flex h-7 items-center gap-1.5 rounded-md pr-1",
-        indent ? "pl-8" : "pl-2"
-      )}
+      style={indentStyle(depth)}
+      className="flex h-7 items-center gap-1.5 rounded-md pr-1"
     >
       {icon}
       <Input
@@ -229,11 +328,15 @@ function SectionHeader({
   children,
   onAdd,
   addLabel,
+  onAddFolder,
+  addFolderLabel,
   className,
 }: {
   children: ReactNode
   onAdd: () => void
   addLabel: string
+  onAddFolder: () => void
+  addFolderLabel: string
   className?: string
 }) {
   return (
@@ -241,22 +344,171 @@ function SectionHeader({
       <span className="px-2 pt-1 pb-1.5 text-[11px] font-semibold tracking-wider text-muted-foreground uppercase">
         {children}
       </span>
-      <Button
-        variant="ghost"
-        size="icon-xs"
-        onClick={onAdd}
-        title={addLabel}
-        aria-label={addLabel}
-        className="text-muted-foreground"
+      <span className="flex items-center">
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          onClick={onAddFolder}
+          title={addFolderLabel}
+          aria-label={addFolderLabel}
+          className="text-muted-foreground"
+        >
+          <FolderPlus />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          onClick={onAdd}
+          title={addLabel}
+          aria-label={addLabel}
+          className="text-muted-foreground"
+        >
+          <Plus />
+        </Button>
+      </span>
+    </div>
+  )
+}
+
+// ---- Folder rows ---------------------------------------------------------
+
+/** Shared per-folder callbacks; one bundle serves both sections. */
+interface FolderCallbacks {
+  editingId: string | null
+  collapsedFolders: string[]
+  onToggleCollapsed: (id: string) => void
+  onNewSubfolder: (section: FolderSection, parentId: string) => void
+  onStartRename: (id: string) => void
+  onCommitRename: (id: string, name: string) => void
+  onCancelRename: () => void
+  onRequestDelete: (target: DeleteTarget) => void
+  onMoveToRoot: (id: string) => void
+}
+
+/** A folder header row plus (when expanded) its recursive contents. Not a
+ *  `Row` — folders don't open in editor slots; the whole header toggles
+ *  collapse instead. */
+function FolderNode<T extends { id: string }>({
+  node,
+  depth,
+  renderDoc,
+  callbacks,
+}: {
+  node: TreeNode<T>
+  depth: number
+  renderDoc: (doc: T, depth: number) => ReactNode
+  callbacks: FolderCallbacks
+}) {
+  const { folder, childFolders, docs } = node
+  const collapsed = callbacks.collapsedFolders.includes(folder.id)
+
+  if (callbacks.editingId === folder.id) {
+    return (
+      <div>
+        <InlineRenameRow
+          initial={folder.name}
+          depth={depth}
+          icon={<FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />}
+          onCommit={(name) => callbacks.onCommitRename(folder.id, name)}
+          onCancel={callbacks.onCancelRename}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => callbacks.onToggleCollapsed(folder.id)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault()
+            callbacks.onToggleCollapsed(folder.id)
+          }
+        }}
+        aria-expanded={!collapsed}
+        style={indentStyle(depth)}
+        className="group/row flex h-7 w-full cursor-pointer items-center gap-1.5 rounded-md pr-1 text-[13px] select-none hover:bg-sidebar-accent/60"
       >
-        <Plus />
-      </Button>
+        <ChevronRight
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground transition-transform",
+            !collapsed && "rotate-90"
+          )}
+        />
+        {collapsed ? (
+          <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : (
+          <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
+        )}
+        <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+        <RowMenu
+          extra={
+            <>
+              <DropdownMenuItem
+                onSelect={() =>
+                  setTimeout(
+                    () => callbacks.onNewSubfolder(folder.section, folder.id),
+                    0
+                  )
+                }
+              >
+                <FolderPlus />
+                New subfolder
+              </DropdownMenuItem>
+              {folder.parentId !== null && (
+                <DropdownMenuItem
+                  onSelect={() =>
+                    setTimeout(() => callbacks.onMoveToRoot(folder.id), 0)
+                  }
+                >
+                  <CornerLeftUp />
+                  Move to root
+                </DropdownMenuItem>
+              )}
+            </>
+          }
+          onRename={() => callbacks.onStartRename(folder.id)}
+          onDelete={() =>
+            callbacks.onRequestDelete({
+              id: folder.id,
+              name: folder.name,
+              kind: "folder",
+            })
+          }
+        />
+      </div>
+      {!collapsed && (
+        <>
+          {childFolders.map((child) => (
+            <FolderNode
+              key={child.folder.id}
+              node={child}
+              depth={depth + 1}
+              renderDoc={renderDoc}
+              callbacks={callbacks}
+            />
+          ))}
+          {docs.map((d) => renderDoc(d, depth + 1))}
+          {childFolders.length === 0 && docs.length === 0 && (
+            <p
+              style={indentStyle(depth + 1)}
+              className="py-1 text-[11px] text-muted-foreground/60 italic select-none"
+            >
+              Empty
+            </p>
+          )}
+        </>
+      )}
     </div>
   )
 }
 
 interface PromptItemProps {
   prompt: Prompt
+  depth?: number
   editing: boolean
   onStartRename: (id: string) => void
   onCommitRename: (id: string, name: string) => void
@@ -270,6 +522,7 @@ interface PromptItemProps {
 
 function PromptItem({
   prompt,
+  depth = 0,
   editing,
   onStartRename,
   onCommitRename,
@@ -283,6 +536,7 @@ function PromptItem({
     return (
       <InlineRenameRow
         initial={prompt.name}
+        depth={depth}
         icon={<KindBadge kind="prompt" className="size-3.5 text-[9px]" />}
         onCommit={(name) => onCommitRename(prompt.id, name)}
         onCancel={onCancelRename}
@@ -298,6 +552,7 @@ function PromptItem({
       docId={prompt.id}
       active={activeDocId === prompt.id}
       open={openDocIds.includes(prompt.id)}
+      depth={depth}
       onOpen={onOpenDoc}
       onOpenToSide={onOpenDocToSide}
       actions={
@@ -318,6 +573,104 @@ function PromptItem({
   )
 }
 
+interface SnippetItemProps {
+  snippet: Snippet
+  depth?: number
+  editing: boolean
+  onStartRename: (id: string) => void
+  onCommitRename: (id: string, name: string) => void
+  onCancelRename: () => void
+  onRequestDelete: (target: DeleteTarget) => void
+  onInsertSnippet: (snippetId: string) => void
+  onPromoteSnippet: (snippetId: string) => void
+  rowProps: Pick<
+    LibrarySidebarProps,
+    "activeDocId" | "openDocIds" | "onOpenDoc" | "onOpenDocToSide"
+  >
+}
+
+function SnippetItem({
+  snippet,
+  depth = 0,
+  editing,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onRequestDelete,
+  onInsertSnippet,
+  onPromoteSnippet,
+  rowProps,
+}: SnippetItemProps) {
+  const { activeDocId, openDocIds, onOpenDoc, onOpenDocToSide } = rowProps
+
+  if (editing) {
+    return (
+      <InlineRenameRow
+        initial={snippet.name}
+        depth={depth}
+        icon={<KindBadge kind="snippet" className="size-3.5 text-[9px]" />}
+        onCommit={(name) => onCommitRename(snippet.id, name)}
+        onCancel={onCancelRename}
+      />
+    )
+  }
+
+  return (
+    <Row
+      docId={snippet.id}
+      active={activeDocId === snippet.id}
+      open={openDocIds.includes(snippet.id)}
+      depth={depth}
+      onOpen={onOpenDoc}
+      onOpenToSide={onOpenDocToSide}
+      actions={
+        <RowMenu
+          extra={
+            <>
+              <DropdownMenuItem
+                onSelect={() => setTimeout(() => onInsertSnippet(snippet.id), 0)}
+              >
+                <Import />
+                Insert into active prompt
+              </DropdownMenuItem>
+              {!snippet.library && (
+                <DropdownMenuItem
+                  onSelect={() =>
+                    setTimeout(() => onPromoteSnippet(snippet.id), 0)
+                  }
+                >
+                  <BookmarkPlus />
+                  Add to library
+                </DropdownMenuItem>
+              )}
+            </>
+          }
+          onRename={() => onStartRename(snippet.id)}
+          onDelete={() =>
+            onRequestDelete({
+              id: snippet.id,
+              name: snippet.name,
+              kind: "snippet",
+            })
+          }
+        />
+      }
+    >
+      <KindBadge kind="snippet" className="size-3.5 text-[9px]" />
+      <span className="min-w-0 flex-1 truncate">{snippet.name}</span>
+      {snippet.stale > 0 && (
+        <span
+          className="size-1.5 shrink-0 rounded-full bg-amber-500"
+          title={`${snippet.stale} of ${snippet.usedBy} using prompts are stale`}
+        />
+      )}
+      <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+        {snippet.usedBy} use{snippet.usedBy === 1 ? "" : "s"}
+      </span>
+    </Row>
+  )
+}
+
 export function LibrarySidebar({
   collapsed,
   onToggleCollapsed,
@@ -331,13 +684,39 @@ export function LibrarySidebar({
   onDeleteDoc,
   onInsertSnippet,
   onPromoteSnippet,
+  onCreateFolder,
+  onRenameFolder,
+  onDeleteFolder,
+  onMoveFolder,
   onSignOut,
 }: LibrarySidebarProps) {
-  const { prompts, snippets } = useLibrary()
-  const { sidebarWidth } = useUiPrefs()
+  const { prompts, snippets, folders } = useLibrary()
+  const { sidebarWidth, collapsedFolders } = useUiPrefs()
   const [editingId, setEditingId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const rowProps = { activeDocId, openDocIds, onOpenDoc, onOpenDocToSide }
+
+  // Collapsed-state garbage collection: drop prefs for folders that no longer
+  // exist (deleted here or out-of-band).
+  useEffect(() => {
+    pruneCollapsedFolders(new Set(folders.map((f) => f.id)))
+  }, [folders])
+
+  // Library shows only SHARED snippets: authored/promoted (library=true) or
+  // referenced by 2+ regions. Filtered BEFORE nesting so it applies inside
+  // folders too; a folder whose snippets are all hidden renders empty.
+  const visibleSnippets = useMemo(
+    () => snippets.filter((s) => s.library || s.usedBy >= 2),
+    [snippets]
+  )
+  const promptTree = useMemo(
+    () => buildTree(folders, prompts, "prompt"),
+    [folders, prompts]
+  )
+  const snippetTree = useMemo(
+    () => buildTree(folders, visibleSnippets, "snippet"),
+    [folders, visibleSnippets]
+  )
 
   const commitRename = (id: string, name: string) => {
     setEditingId(null)
@@ -353,6 +732,59 @@ export function LibrarySidebar({
     const id = await onCreateSnippet()
     if (id) setEditingId(id)
   }
+  const newFolder = async (section: FolderSection, parentId: string | null) => {
+    // A subfolder born inside a collapsed parent must be visible to rename.
+    // expandFolder, NOT a toggle: this runs from a portal menu's deferred
+    // handler, where a stale closure + toggle would collapse instead.
+    if (parentId) expandFolder(parentId)
+    const id = await onCreateFolder(section, parentId)
+    if (id) setEditingId(id)
+  }
+
+  const folderCallbacks: FolderCallbacks = {
+    editingId,
+    collapsedFolders,
+    onToggleCollapsed: toggleFolderCollapsed,
+    onNewSubfolder: (section, parentId) => void newFolder(section, parentId),
+    onStartRename: setEditingId,
+    onCommitRename: (id, name) => {
+      setEditingId(null)
+      onRenameFolder(id, name)
+    },
+    onCancelRename: cancelRename,
+    onRequestDelete: setDeleteTarget,
+    // Append at the end of the root level (the store clamps the index).
+    onMoveToRoot: (id) => onMoveFolder(id, null, Number.MAX_SAFE_INTEGER),
+  }
+
+  const renderPrompt = (prompt: Prompt, depth: number) => (
+    <PromptItem
+      key={prompt.id}
+      prompt={prompt}
+      depth={depth}
+      editing={editingId === prompt.id}
+      onStartRename={setEditingId}
+      onCommitRename={commitRename}
+      onCancelRename={cancelRename}
+      onRequestDelete={setDeleteTarget}
+      rowProps={rowProps}
+    />
+  )
+  const renderSnippet = (snippet: Snippet, depth: number) => (
+    <SnippetItem
+      key={snippet.id}
+      snippet={snippet}
+      depth={depth}
+      editing={editingId === snippet.id}
+      onStartRename={setEditingId}
+      onCommitRename={commitRename}
+      onCancelRename={cancelRename}
+      onRequestDelete={setDeleteTarget}
+      onInsertSnippet={onInsertSnippet}
+      onPromoteSnippet={onPromoteSnippet}
+      rowProps={rowProps}
+    />
+  )
 
   if (collapsed) {
     return (
@@ -403,105 +835,49 @@ export function LibrarySidebar({
       </header>
 
       <nav className="min-h-0 flex-1 overflow-y-auto p-2">
-        <SectionHeader onAdd={() => void newPrompt()} addLabel="New prompt">
+        <SectionHeader
+          onAdd={() => void newPrompt()}
+          addLabel="New prompt"
+          onAddFolder={() => void newFolder("prompt", null)}
+          addFolderLabel="New prompt folder"
+        >
           Prompts
         </SectionHeader>
-        {prompts.map((prompt) => (
-          <PromptItem
-            key={prompt.id}
-            prompt={prompt}
-            editing={editingId === prompt.id}
-            onStartRename={setEditingId}
-            onCommitRename={commitRename}
-            onCancelRename={cancelRename}
-            onRequestDelete={setDeleteTarget}
-            rowProps={rowProps}
+        {promptTree.rootFolders.map((node) => (
+          <FolderNode
+            key={node.folder.id}
+            node={node}
+            depth={0}
+            renderDoc={renderPrompt}
+            callbacks={folderCallbacks}
           />
         ))}
+        {promptTree.rootDocs.map((p) => renderPrompt(p, 0))}
 
         <SectionHeader
           onAdd={() => void newSnippet()}
           addLabel="New snippet"
+          onAddFolder={() => void newFolder("snippet", null)}
+          addFolderLabel="New snippet folder"
           className="mt-4"
         >
           Snippets
         </SectionHeader>
-        {/* Library shows only SHARED snippets: authored/promoted (library=true)
-            or referenced by 2+ regions. One-off, mark-created snippets stay
-            hidden until reused. */}
-        {snippets.filter((s) => s.library || s.usedBy >= 2).length === 0 && (
+        {visibleSnippets.length === 0 && (
           <p className="px-2 py-1 text-[12px] leading-relaxed text-muted-foreground">
             No shared snippets yet. Mark a region in a prompt, then reuse it.
           </p>
         )}
-        {snippets
-          .filter((s) => s.library || s.usedBy >= 2)
-          .map((snippet) =>
-          editingId === snippet.id ? (
-            <InlineRenameRow
-              key={snippet.id}
-              initial={snippet.name}
-              icon={<KindBadge kind="snippet" className="size-3.5 text-[9px]" />}
-              onCommit={(name) => commitRename(snippet.id, name)}
-              onCancel={cancelRename}
-            />
-          ) : (
-            <Row
-              key={snippet.id}
-              docId={snippet.id}
-              active={activeDocId === snippet.id}
-              open={openDocIds.includes(snippet.id)}
-              onOpen={onOpenDoc}
-              onOpenToSide={onOpenDocToSide}
-              actions={
-                <RowMenu
-                  extra={
-                    <>
-                      <DropdownMenuItem
-                        onSelect={() =>
-                          setTimeout(() => onInsertSnippet(snippet.id), 0)
-                        }
-                      >
-                        <Import />
-                        Insert into active prompt
-                      </DropdownMenuItem>
-                      {!snippet.library && (
-                        <DropdownMenuItem
-                          onSelect={() =>
-                            setTimeout(() => onPromoteSnippet(snippet.id), 0)
-                          }
-                        >
-                          <BookmarkPlus />
-                          Add to library
-                        </DropdownMenuItem>
-                      )}
-                    </>
-                  }
-                  onRename={() => setEditingId(snippet.id)}
-                  onDelete={() =>
-                    setDeleteTarget({
-                      id: snippet.id,
-                      name: snippet.name,
-                      kind: "snippet",
-                    })
-                  }
-                />
-              }
-            >
-              <KindBadge kind="snippet" className="size-3.5 text-[9px]" />
-              <span className="min-w-0 flex-1 truncate">{snippet.name}</span>
-              {snippet.stale > 0 && (
-                <span
-                  className="size-1.5 shrink-0 rounded-full bg-amber-500"
-                  title={`${snippet.stale} of ${snippet.usedBy} using prompts are stale`}
-                />
-              )}
-              <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                {snippet.usedBy} use{snippet.usedBy === 1 ? "" : "s"}
-              </span>
-            </Row>
-          )
-        )}
+        {snippetTree.rootFolders.map((node) => (
+          <FolderNode
+            key={node.folder.id}
+            node={node}
+            depth={0}
+            renderDoc={renderSnippet}
+            callbacks={folderCallbacks}
+          />
+        ))}
+        {snippetTree.rootDocs.map((s) => renderSnippet(s, 0))}
       </nav>
 
       {onSignOut && (
@@ -532,7 +908,9 @@ export function LibrarySidebar({
             <AlertDialogDescription>
               {deleteTarget?.kind === "prompt"
                 ? "This permanently deletes the prompt and its saved version history. This can't be undone."
-                : "This removes the snippet from the library. Prompts that used it keep their copied text — they just stop tracking it. This can't be undone."}
+                : deleteTarget?.kind === "snippet"
+                  ? "This removes the snippet from the library. Prompts that used it keep their copied text — they just stop tracking it. This can't be undone."
+                  : "Everything inside moves up one level — no prompts, snippets, or subfolders are deleted."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -543,7 +921,11 @@ export function LibrarySidebar({
               <Button
                 variant="destructive"
                 onClick={() => {
-                  if (deleteTarget) onDeleteDoc(deleteTarget.id)
+                  if (deleteTarget?.kind === "folder") {
+                    onDeleteFolder(deleteTarget.id)
+                  } else if (deleteTarget) {
+                    onDeleteDoc(deleteTarget.id)
+                  }
                   setDeleteTarget(null)
                 }}
               >

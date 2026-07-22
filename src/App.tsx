@@ -11,17 +11,22 @@ import {
   regionsOverlap,
 } from "@/lib/editor"
 import {
+  createFolder,
   createPrompt,
   createSnippet,
   deleteDoc,
+  deleteFolder,
   flushPendingNow,
   getDoc,
   getSnippet,
   getSnippetBody,
+  moveFolder,
   promoteSnippet,
   renameDoc,
+  renameFolder,
   reportError,
   useLibrary,
+  type FolderSection,
 } from "@/lib/library"
 import { isSupabaseConfigured } from "@/lib/supabase"
 import { setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
@@ -157,6 +162,50 @@ function App() {
     }
   }, [])
 
+  // Folder CRUD: same await-first + banner idiom as the doc handlers. Folder
+  // deletes move contents up a level, so no editor panes need closing.
+  const handleCreateFolder = useCallback(
+    async (
+      section: FolderSection,
+      parentId: string | null
+    ): Promise<string | null> => {
+      try {
+        return await createFolder(section, parentId)
+      } catch (e) {
+        reportError(e instanceof Error ? e.message : "Couldn't create the folder.")
+        return null
+      }
+    },
+    []
+  )
+
+  const handleRenameFolder = useCallback(async (id: string, name: string) => {
+    try {
+      await renameFolder(id, name)
+    } catch (e) {
+      reportError(e instanceof Error ? e.message : "Couldn't rename the folder.")
+    }
+  }, [])
+
+  const handleDeleteFolder = useCallback(async (id: string) => {
+    try {
+      await deleteFolder(id)
+    } catch (e) {
+      reportError(e instanceof Error ? e.message : "Couldn't delete the folder.")
+    }
+  }, [])
+
+  const handleMoveFolder = useCallback(
+    async (id: string, parentId: string | null, index: number) => {
+      try {
+        await moveFolder(id, parentId, index)
+      } catch (e) {
+        reportError(e instanceof Error ? e.message : "Couldn't move the folder.")
+      }
+    },
+    []
+  )
+
   const handleSignOut = useCallback(() => {
     void signOut()
   }, [])
@@ -204,6 +253,10 @@ function App() {
           onDeleteDoc={handleDeleteDoc}
           onInsertSnippet={handleInsertSnippet}
           onPromoteSnippet={handlePromoteSnippet}
+          onCreateFolder={handleCreateFolder}
+          onRenameFolder={handleRenameFolder}
+          onDeleteFolder={handleDeleteFolder}
+          onMoveFolder={handleMoveFolder}
           onSignOut={isSupabaseConfigured ? handleSignOut : undefined}
         />
         <main className="min-w-0 flex-1">
