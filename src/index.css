@@ -279,15 +279,40 @@
 }
 .prompt-editor.pe-zen .cm-content {
     /* .cm-content is a flex child of .cm-scroller — pin it to a centered
-       measure-width column (mirrors the prototype's overrides). */
+       measure-width column (mirrors the prototype's overrides). The fold
+       gutter is the other flex child: its margin-left:auto plus our
+       margin-right:auto center the PAIR, so fold markers hug the column
+       instead of the far slot edge. The 2rem reservation keeps the sticky
+       gutter from overlapping text on narrow slots. */
     flex: none !important;
-    width: min(42rem, 100%) !important;
+    width: min(42rem, 100% - 2rem) !important;
     max-width: 42rem;
-    margin: 0 auto !important;
+    margin: 0 auto 0 0 !important;
     padding: 48px 24px 35vh;
     transition: color 0.35s;
 }
 .prompt-editor.pe-zen .tok-heading { font-size: 1.1em; }
+
+/* Zen fold gutter: chrome-free, hover-revealed. Open markers appear only
+   while the scroller is hovered; closed markers stay faintly visible so
+   hidden content is never invisible-and-unmarked. */
+.prompt-editor.pe-zen .cm-gutters {
+    background: transparent;
+    border-right: none;
+    margin-left: auto;
+}
+.prompt-editor.pe-zen .cm-foldGutter .pe-fold-open {
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+.prompt-editor.pe-zen .cm-scroller:hover .cm-foldGutter .pe-fold-open {
+    opacity: 0.55;
+}
+.prompt-editor.pe-zen .cm-foldGutter .pe-fold-closed { opacity: 0.55; }
+.prompt-editor.pe-zen .cm-foldGutter .cm-gutterElement:hover .pe-fold-open,
+.prompt-editor.pe-zen .cm-foldGutter .cm-gutterElement:hover .pe-fold-closed {
+    opacity: 1;
+}
 
 /* Zen without X-ray: regions recede to a faint section glyph. */
 .prompt-editor.pe-zen .pi-region {
