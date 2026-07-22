@@ -5,7 +5,7 @@ import type {
 import { X } from "lucide-react"
 
 import { PromptEditor } from "@/components/editor/prompt-editor"
-import { getDoc, type DocKind } from "@/lib/library"
+import { getDoc, useDoc, type DocKind } from "@/lib/library"
 import { cn } from "@/lib/utils"
 
 /** Params carried by every generic editor slot — the doc it displays. */
@@ -71,7 +71,8 @@ export function EditorSlotPanel({ params }: IDockviewPanelProps<SlotParams>) {
 
 /** Custom tab: kind badge + title + close, so slots read at a glance. */
 export function DocTab({ params, api }: IDockviewPanelHeaderProps<SlotParams>) {
-  const doc = getDoc(params.docId)
+  // Reactive read (not getDoc) so a sidebar rename repaints the tab title.
+  const doc = useDoc(params.docId)
 
   return (
     <div className="flex h-full items-center gap-1.5 pr-1 pl-2 text-xs">

@@ -864,6 +864,14 @@ export function getDoc(id: string): Doc | undefined {
   return docs.get(id)
 }
 
+/** Reactive view of one doc — re-renders when THAT doc changes (title, body,
+ *  regions). Grid tabs use it so a rename in the sidebar repaints the header.
+ *  Same idiom as useSaveState: docs.get(id) is a stable reference between
+ *  mutations, so the snapshot is safe for useSyncExternalStore. */
+export function useDoc(id: string): Doc | undefined {
+  return useSyncExternalStore(subscribe, () => docs.get(id))
+}
+
 /** Look up a snippet by id. Returns undefined for an unlinked/dangling id — a
  *  region whose snippet was deleted keeps its (copied) text and is treated as a
  *  plain local region. Consumers must tolerate undefined. */
