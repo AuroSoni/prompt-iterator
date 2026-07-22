@@ -39,8 +39,10 @@ export interface Prompt {
   tokens: number
   /** Version number the working copy was last saved as. */
   currentVersion: number
-  /** Stable list position; also the basis for a new prompt's sort_order. */
+  /** Stable position among sibling docs at its tree level. */
   sortOrder: number
+  /** Containing sidebar folder; null = section root. */
+  folderId: string | null
   versions: PromptVersion[]
 }
 
@@ -57,8 +59,41 @@ export interface Snippet {
    *  promoted. Mark-created snippets start false and surface only once used by
    *  2+ regions (see the sidebar's `library || usedBy >= 2` filter). */
   library: boolean
-  /** Stable list position; also the basis for a new snippet's sort_order. */
+  /** Stable position among sibling docs at its tree level. */
   sortOrder: number
+  /** Containing sidebar folder; null = section root. */
+  folderId: string | null
+  /** The snippet's OWN annotation — editable on the snippet doc, surfaced
+   *  read-only in prompt inspectors that link it (one-way rollup). Region
+   *  notes are separate and prompt-local (Region.note). */
+  note: string
+}
+
+export type FolderSection = "prompt" | "snippet"
+
+/** A sidebar folder. Per-section trees: a folder belongs to the Prompts or the
+ *  Snippets section and holds that kind's docs plus subfolders (arbitrary
+ *  nesting via parentId). Folders are pure organization — deleting one moves
+ *  its contents up a level, never deletes docs. */
+export interface Folder {
+  id: string
+  name: string
+  section: FolderSection
+  /** Parent folder; null = section root. */
+  parentId: string | null
+  /** Position among sibling FOLDERS at this level (docs have their own sequence). */
+  sortOrder: number
+}
+
+/** Level ordering with a stable id tie-break: children moved up by a folder
+ *  delete keep their old sort_orders (which may collide with existing
+ *  siblings); the tie-break keeps rendering deterministic until the next drop
+ *  renumbers the level. */
+export function bySortOrder<T extends { sortOrder: number; id: string }>(
+  a: T,
+  b: T
+): number {
+  return a.sortOrder - b.sortOrder || a.id.localeCompare(b.id)
 }
 
 /** A resolved, openable document — what an editor slot displays. */
@@ -371,6 +406,7 @@ The examples below are load-bearing: they anchor tone, format, and escalation be
 interface LibraryData {
   prompts: Prompt[]
   snippets: Snippet[]
+  folders: Folder[]
   docs: Map<string, Doc>
 }
 
@@ -420,6 +456,7 @@ function buildSeedData(): LibraryData {
       tokens: approxTokens(working.body),
       currentVersion: seed.currentVersion,
       sortOrder: i,
+      folderId: null,
       versions,
     }
   })
@@ -443,10 +480,13 @@ function buildSeedData(): LibraryData {
       stale: seed.stale,
       library: true,
       sortOrder: i,
+      folderId: null,
+      note: "",
     }
   })
 
-  return { prompts, snippets, docs }
+  // Seeds ship flat: no folders until the user makes some.
+  return { prompts, snippets, folders: [], docs }
 }
 
 // ---- Supabase row mapping ------------------------------------------------
@@ -454,6 +494,7 @@ function buildSeedData(): LibraryData {
 type PromptRow = Database["public"]["Tables"]["prompts"]["Row"]
 type VersionRow = Database["public"]["Tables"]["prompt_versions"]["Row"]
 type SnippetRow = Database["public"]["Tables"]["snippets"]["Row"]
+type FolderRow = Database["public"]["Tables"]["folders"]["Row"]
 type PromptInsert = Database["public"]["Tables"]["prompts"]["Insert"]
 type VersionInsert = Database["public"]["Tables"]["prompt_versions"]["Insert"]
 type SnippetInsert = Database["public"]["Tables"]["snippets"]["Insert"]
@@ -512,7 +553,8 @@ function rowsFromSeed(seed: LibraryData): {
 function domainFromRows(
   promptRows: PromptRow[],
   versionRows: VersionRow[],
-  snippetRows: SnippetRow[]
+  snippetRows: SnippetRow[],
+  folderRows: FolderRow[]
 ): LibraryData {
   const docs = new Map<string, Doc>()
   const prompts: Prompt[] = promptRows.map((pr) => {
@@ -553,6 +595,7 @@ function domainFromRows(
       tokens: pr.tokens,
       currentVersion: pr.current_version,
       sortOrder: pr.sort_order,
+      folderId: pr.folder_id ?? null,
       versions,
     }
   })
@@ -576,10 +619,20 @@ function domainFromRows(
       stale: sr.stale,
       library: sr.library,
       sortOrder: sr.sort_order,
+      folderId: sr.folder_id ?? null,
+      note: sr.note ?? "",
     }
   })
 
-  return { prompts, snippets, docs }
+  const folders: Folder[] = folderRows.map((fr) => ({
+    id: fr.id,
+    name: fr.name,
+    section: fr.section,
+    parentId: fr.parent_id,
+    sortOrder: fr.sort_order,
+  }))
+
+  return { prompts, snippets, folders, docs }
 }
 
 // ---- Reactive store ------------------------------------------------------
@@ -588,6 +641,7 @@ type Status = "loading" | "ready"
 
 let prompts: Prompt[] = []
 let snippets: Snippet[] = []
+let folders: Folder[] = []
 let docs = new Map<string, Doc>()
 /** Last-known canonical body per snippet id: the baseline the flush diff bumps
  *  `version` against, and the source of truth `getSnippetBody` returns. Seeded on
@@ -608,16 +662,17 @@ let flushListenersRegistered = false
 export interface LibrarySnapshot {
   prompts: Prompt[]
   snippets: Snippet[]
+  folders: Folder[]
   status: Status
   error: string | null
 }
 
 // Cached so useSyncExternalStore sees a stable reference between changes.
-let snapshot: LibrarySnapshot = { prompts, snippets, status, error }
+let snapshot: LibrarySnapshot = { prompts, snippets, folders, status, error }
 const listeners = new Set<() => void>()
 
 function emit(): void {
-  snapshot = { prompts, snippets, status, error }
+  snapshot = { prompts, snippets, folders, status, error }
   for (const listener of listeners) listener()
 }
 
@@ -640,6 +695,7 @@ export function useLibrary(): LibrarySnapshot {
 function applyState(data: LibraryData, err: string | null): void {
   prompts = data.prompts
   snippets = data.snippets
+  folders = data.folders
   docs = data.docs
   // Seed the canonical-body baseline from loaded snippet bodies, then derive
   // usedBy/stale from the loaded regions (overwriting any stored/seed counters).
@@ -791,13 +847,23 @@ async function loadFromSupabase(seed: LibraryData): Promise<LibraryData> {
   // was interrupted before writing it. Because the check is the marker (not
   // "tables empty"), a user who deletes every prompt does NOT get reseeded.
   if (seeded) {
-    return domainFromRows(rows.promptRows, rows.versionRows, rows.snippetRows)
+    return domainFromRows(
+      rows.promptRows,
+      rows.versionRows,
+      rows.snippetRows,
+      rows.folderRows
+    )
   }
   await seedSupabase(seed)
   // Re-read rather than returning the seed: on a heal the prompts table may
   // already hold the user's edits, which the idempotent seed left untouched.
   const filled = await fetchAll(sb)
-  return domainFromRows(filled.promptRows, filled.versionRows, filled.snippetRows)
+  return domainFromRows(
+    filled.promptRows,
+    filled.versionRows,
+    filled.snippetRows,
+    filled.folderRows
+  )
 }
 
 /** Has the sample library already been seeded? Tracked by a durable server-side
@@ -818,19 +884,23 @@ async function fetchAll(sb: NonNullable<typeof supabase>): Promise<{
   promptRows: PromptRow[]
   versionRows: VersionRow[]
   snippetRows: SnippetRow[]
+  folderRows: FolderRow[]
 }> {
-  const [pRes, vRes, sRes] = await Promise.all([
+  const [pRes, vRes, sRes, fRes] = await Promise.all([
     sb.from("prompts").select("*").order("sort_order"),
     sb.from("prompt_versions").select("*"),
     sb.from("snippets").select("*").order("sort_order"),
+    sb.from("folders").select("*").order("sort_order"),
   ])
   if (pRes.error) throw pRes.error
   if (vRes.error) throw vRes.error
   if (sRes.error) throw sRes.error
+  if (fRes.error) throw fRes.error
   return {
     promptRows: pRes.data ?? [],
     versionRows: vRes.data ?? [],
     snippetRows: sRes.data ?? [],
+    folderRows: fRes.data ?? [],
   }
 }
 
@@ -882,6 +952,11 @@ export function getSnippet(id: string): Snippet | undefined {
 /** The snippet's canonical body — what a pull/insert copies in. */
 export function getSnippetBody(id: string): string | undefined {
   return canonicalBody.get(id) ?? docs.get(id)?.body
+}
+
+/** Snapshot of all snippets for non-React callers (the auto-match scan). */
+export function listSnippets(): Snippet[] {
+  return snippets
 }
 
 /** The doc to open on a fresh workspace. Valid after hydrate() resolves. */
@@ -1107,10 +1182,11 @@ function nextSortOrder(list: { sortOrder: number }[]): number {
   return Math.max(-1, ...list.map((x) => x.sortOrder)) + 1
 }
 
-/** Create a blank prompt and return its id. Persists first when backed by a DB. */
+/** Create a blank prompt and return its id. Persists first when backed by a DB.
+ *  New docs land at the section ROOT (folder placement is a later drag). */
 export async function createPrompt(name: string): Promise<string> {
   const id = `p_${crypto.randomUUID()}`
-  const sortOrder = nextSortOrder(prompts)
+  const sortOrder = nextSortOrder(prompts.filter((p) => p.folderId === null))
   const tokens = approxTokens("")
   if (persistent && supabase) {
     const { error: e } = await supabase.from("prompts").insert({
@@ -1121,6 +1197,7 @@ export async function createPrompt(name: string): Promise<string> {
       tokens,
       current_version: 0,
       sort_order: sortOrder,
+      folder_id: null,
     })
     if (e) throw e
   }
@@ -1135,16 +1212,16 @@ export async function createPrompt(name: string): Promise<string> {
   })
   prompts = [
     ...prompts,
-    { id, name, tokens, currentVersion: 0, sortOrder, versions: [] },
+    { id, name, tokens, currentVersion: 0, sortOrder, folderId: null, versions: [] },
   ]
   emit()
   return id
 }
 
-/** Create a blank snippet and return its id. */
+/** Create a blank snippet and return its id. New docs land at the section root. */
 export async function createSnippet(name: string): Promise<string> {
   const id = `s_${crypto.randomUUID()}`
-  const sortOrder = nextSortOrder(snippets)
+  const sortOrder = nextSortOrder(snippets.filter((s) => s.folderId === null))
   const tokens = approxTokens("")
   if (persistent && supabase) {
     const { error: e } = await supabase.from("snippets").insert({
@@ -1157,6 +1234,7 @@ export async function createSnippet(name: string): Promise<string> {
       used_by: 0,
       stale: 0,
       sort_order: sortOrder,
+      folder_id: null,
     })
     if (e) throw e
   }
@@ -1172,7 +1250,18 @@ export async function createSnippet(name: string): Promise<string> {
   canonicalBody.set(id, "")
   snippets = [
     ...snippets,
-    { id, name, tokens, version: 1, usedBy: 0, stale: 0, library: true, sortOrder },
+    {
+      id,
+      name,
+      tokens,
+      version: 1,
+      usedBy: 0,
+      stale: 0,
+      library: true,
+      sortOrder,
+      folderId: null,
+      note: "",
+    },
   ]
   emit()
   return id
@@ -1193,7 +1282,7 @@ export async function createSnippetFromText(
   if (existing) return { id: existing.id, version: existing.version }
 
   const id = `s_${crypto.randomUUID()}`
-  const sortOrder = nextSortOrder(snippets)
+  const sortOrder = nextSortOrder(snippets.filter((s) => s.folderId === null))
   const tokens = approxTokens(text)
   if (persistent && supabase) {
     const { error: e } = await supabase.from("snippets").insert({
@@ -1207,6 +1296,7 @@ export async function createSnippetFromText(
       stale: 0,
       library: false,
       sort_order: sortOrder,
+      folder_id: null,
     })
     if (e) throw e
   }
@@ -1222,7 +1312,18 @@ export async function createSnippetFromText(
   canonicalBody.set(id, text)
   snippets = [
     ...snippets,
-    { id, name, tokens, version: 1, usedBy: 0, stale: 0, library: false, sortOrder },
+    {
+      id,
+      name,
+      tokens,
+      version: 1,
+      usedBy: 0,
+      stale: 0,
+      library: false,
+      sortOrder,
+      folderId: null,
+      note: "",
+    },
   ]
   emit()
   return { id, version: 1 }
@@ -1271,6 +1372,26 @@ export async function updateSnippetFromRegion(
   recomputeUsage()
   emit()
   return nextVersion
+}
+
+/** Set a snippet's own note. Await-first (mirrors renameDoc): the row UPDATE
+ *  is confirmed before the store mutates. Commit-on-blur, so no debounce.
+ *  Stored verbatim — notes are prose — except a whitespace-only note collapses
+ *  to "" so the read-only rollup's "only when non-empty" check stays honest. */
+export async function updateSnippetNote(id: string, note: string): Promise<void> {
+  const snip = snippets.find((s) => s.id === id)
+  if (!snip) return
+  const next = note.trim() === "" ? "" : note
+  if (next === snip.note) return
+  if (persistent && supabase) {
+    const { error: e } = await supabase
+      .from("snippets")
+      .update({ note: next })
+      .eq("id", id)
+    if (e) throw e
+  }
+  snippets = snippets.map((s) => (s.id === id ? { ...s, note: next } : s))
+  emit()
 }
 
 /** Rename a prompt or snippet. No-ops on empty/unchanged names and version docs. */
@@ -1338,6 +1459,239 @@ export async function deleteDoc(id: string): Promise<string[]> {
   return removed
 }
 
+// ---- Folders (structural, await-first like the CRUD above) ---------------
+
+/** Is `candidateId` the folder itself or inside its subtree? The cycle guard
+ *  for moveFolder and the sidebar's drag canDrop. */
+export function isSelfOrDescendant(
+  candidateId: string | null,
+  folderId: string
+): boolean {
+  let cur = candidateId
+  const seen = new Set<string>()
+  while (cur) {
+    if (cur === folderId) return true
+    if (seen.has(cur)) return false // corrupt-data cycle: bail safely
+    seen.add(cur)
+    cur = folders.find((f) => f.id === cur)?.parentId ?? null
+  }
+  return false
+}
+
+/** Create a folder at the end of its sibling level; returns its id. */
+export async function createFolder(
+  section: FolderSection,
+  parentId: string | null = null,
+  name = "New folder"
+): Promise<string> {
+  const id = `f_${crypto.randomUUID()}`
+  const sortOrder = nextSortOrder(
+    folders.filter((f) => f.section === section && f.parentId === parentId)
+  )
+  if (persistent && supabase) {
+    const { error: e } = await supabase.from("folders").insert({
+      id,
+      name,
+      section,
+      parent_id: parentId,
+      sort_order: sortOrder,
+    })
+    if (e) throw e
+  }
+  folders = [...folders, { id, name, section, parentId, sortOrder }]
+  emit()
+  return id
+}
+
+/** Rename a folder. No-ops on empty/unchanged names. */
+export async function renameFolder(id: string, name: string): Promise<void> {
+  const folder = folders.find((f) => f.id === id)
+  const trimmed = name.trim()
+  if (!folder || !trimmed || trimmed === folder.name) return
+  if (persistent && supabase) {
+    const { error: e } = await supabase
+      .from("folders")
+      .update({ name: trimmed })
+      .eq("id", id)
+    if (e) throw e
+  }
+  folders = folders.map((f) => (f.id === id ? { ...f, name: trimmed } : f))
+  emit()
+}
+
+/** Delete a folder; its subfolders and docs move UP to the folder's parent.
+ *  Reparent FIRST, then delete — the FK `set null` net never fires, and a
+ *  mid-sequence failure leaves a consistent (just flatter) tree; retrying is
+ *  idempotent. Not transactional (client-side Supabase), acceptable because
+ *  every intermediate state is valid. */
+export async function deleteFolder(id: string): Promise<void> {
+  const folder = folders.find((f) => f.id === id)
+  if (!folder) return
+  const parent = folder.parentId
+  if (persistent && supabase) {
+    const f = await supabase
+      .from("folders")
+      .update({ parent_id: parent })
+      .eq("parent_id", id)
+    if (f.error) throw f.error
+    // Branch per table so the typed builder keeps its per-table payload.
+    const d =
+      folder.section === "prompt"
+        ? await supabase.from("prompts").update({ folder_id: parent }).eq("folder_id", id)
+        : await supabase.from("snippets").update({ folder_id: parent }).eq("folder_id", id)
+    if (d.error) throw d.error
+    const del = await supabase.from("folders").delete().eq("id", id)
+    if (del.error) throw del.error
+  }
+  folders = folders
+    .filter((f) => f.id !== id)
+    .map((f) => (f.parentId === id ? { ...f, parentId: parent } : f))
+  if (folder.section === "prompt") {
+    prompts = prompts.map((p) =>
+      p.folderId === id ? { ...p, folderId: parent } : p
+    )
+  } else {
+    snippets = snippets.map((s) =>
+      s.folderId === id ? { ...s, folderId: parent } : s
+    )
+  }
+  emit()
+}
+
+/** One renumbered write per changed row. Lists are small (dozens); per-row
+ *  UPDATEs beat a bulk upsert, which could INSERT a junk default-bodied row if
+ *  an id ever went missing. A partial failure leaves the server renumbered
+ *  ahead of memory — every intermediate state is valid, the error surfaces on
+ *  the banner, and the next successful drop at that level heals the order. */
+interface LevelChange {
+  id: string
+  sort_order: number
+  folder_id: string | null
+}
+
+/** Move a prompt/snippet into `folderId` (null = section root) at `index`
+ *  among the FULL sibling doc list (hidden snippets included — the sidebar
+ *  maps visible positions to store positions by target id, not index math).
+ *  Renumbers the target level 0..n; writes only rows that actually changed, so
+ *  a same-place drop is write-free. */
+export async function moveDoc(
+  docId: string,
+  folderId: string | null,
+  index: number
+): Promise<void> {
+  const doc = docs.get(docId)
+  if (!doc || (doc.kind !== "prompt" && doc.kind !== "snippet")) return
+  if (folderId) {
+    const target = folders.find((f) => f.id === folderId)
+    if (!target || target.section !== doc.kind) return // section guard
+  }
+  const list: Array<Prompt | Snippet> =
+    doc.kind === "prompt" ? prompts : snippets
+  const moved = list.find((d) => d.id === docId)
+  if (!moved) return
+  const siblings = list
+    .filter((d) => d.id !== docId && d.folderId === folderId)
+    .sort(bySortOrder)
+  const at = Math.max(0, Math.min(index, siblings.length))
+  const nextLevel = [
+    ...siblings.slice(0, at),
+    { ...moved, folderId },
+    ...siblings.slice(at),
+  ]
+  const changes: LevelChange[] = nextLevel.flatMap((d, i) =>
+    d.sortOrder !== i || (d.id === docId && moved.folderId !== folderId)
+      ? [{ id: d.id, sort_order: i, folder_id: folderId }]
+      : []
+  )
+  if (changes.length === 0) return
+  if (persistent && supabase) {
+    const sb = supabase
+    const results = await Promise.all(
+      changes.map((c) =>
+        doc.kind === "prompt"
+          ? sb
+              .from("prompts")
+              .update({ sort_order: c.sort_order, folder_id: c.folder_id })
+              .eq("id", c.id)
+          : sb
+              .from("snippets")
+              .update({ sort_order: c.sort_order, folder_id: c.folder_id })
+              .eq("id", c.id)
+      )
+    )
+    const failed = results.find((r) => r.error)
+    if (failed?.error) throw failed.error
+  }
+  const byId = new Map(changes.map((c) => [c.id, c]))
+  if (doc.kind === "prompt") {
+    prompts = prompts.map((p) => {
+      const c = byId.get(p.id)
+      return c ? { ...p, sortOrder: c.sort_order, folderId: c.folder_id } : p
+    })
+  } else {
+    snippets = snippets.map((s) => {
+      const c = byId.get(s.id)
+      return c ? { ...s, sortOrder: c.sort_order, folderId: c.folder_id } : s
+    })
+  }
+  emit()
+}
+
+/** Move a folder under `parentId` (null = section root) at `index` among its
+ *  sibling folders. Rejects cross-section moves and cycles (self/descendant). */
+export async function moveFolder(
+  folderId: string,
+  parentId: string | null,
+  index: number
+): Promise<void> {
+  const moved = folders.find((f) => f.id === folderId)
+  if (!moved) return
+  if (parentId) {
+    const target = folders.find((f) => f.id === parentId)
+    if (!target || target.section !== moved.section) return
+    if (isSelfOrDescendant(parentId, folderId)) return // cycle prevention
+  }
+  const siblings = folders
+    .filter(
+      (f) =>
+        f.id !== folderId &&
+        f.section === moved.section &&
+        f.parentId === parentId
+    )
+    .sort(bySortOrder)
+  const at = Math.max(0, Math.min(index, siblings.length))
+  const nextLevel = [
+    ...siblings.slice(0, at),
+    { ...moved, parentId },
+    ...siblings.slice(at),
+  ]
+  const changes = nextLevel.flatMap((f, i) =>
+    f.sortOrder !== i || (f.id === folderId && moved.parentId !== parentId)
+      ? [{ id: f.id, sort_order: i, parent_id: parentId }]
+      : []
+  )
+  if (changes.length === 0) return
+  if (persistent && supabase) {
+    const sb = supabase
+    const results = await Promise.all(
+      changes.map((c) =>
+        sb
+          .from("folders")
+          .update({ sort_order: c.sort_order, parent_id: c.parent_id })
+          .eq("id", c.id)
+      )
+    )
+    const failed = results.find((r) => r.error)
+    if (failed?.error) throw failed.error
+  }
+  const byId = new Map(changes.map((c) => [c.id, c]))
+  folders = folders.map((f) => {
+    const c = byId.get(f.id)
+    return c ? { ...f, sortOrder: c.sort_order, parentId: c.parent_id } : f
+  })
+  emit()
+}
+
 // ---- Session lifecycle ---------------------------------------------------
 
 /** Await all pending writes now, then resolve — used by sign-out before the
@@ -1370,6 +1724,7 @@ export function resetLibrary(): void {
   canonicalBody.clear()
   prompts = []
   snippets = []
+  folders = []
   docs = new Map()
   status = "loading"
   error = null

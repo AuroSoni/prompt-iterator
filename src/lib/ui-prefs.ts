@@ -14,6 +14,11 @@ export interface UiPrefs {
   inspectorWidth: number
   outlineVisible: boolean
   inspectorVisible: boolean
+  sidebarCollapsed: boolean
+  /** Library folder ids the user collapsed. Absent = expanded, so new folders
+   *  render open. The sidebar prunes ids of deleted folders (see
+   *  pruneCollapsedFolders); the sanitize cap bounds worst-case garbage. */
+  collapsedFolders: string[]
 }
 
 /** Defaults mirror the pre-resize Tailwind widths (w-64 / w-52 / w-60), so a
@@ -44,13 +49,22 @@ function sanitize(raw: unknown): UiPrefs {
       ? clamp(Math.round(v), min, max)
       : def
   }
-  const bool = (k: string) => (typeof r[k] === "boolean" ? (r[k] as boolean) : true)
+  const bool = (k: string, def = true) =>
+    typeof r[k] === "boolean" ? (r[k] as boolean) : def
+  const collapsedFolders = Array.isArray(r.collapsedFolders)
+    ? r.collapsedFolders
+        .filter((x): x is string => typeof x === "string")
+        .slice(0, 500)
+    : []
   return {
     sidebarWidth: num("sidebarWidth"),
     outlineWidth: num("outlineWidth"),
     inspectorWidth: num("inspectorWidth"),
     outlineVisible: bool("outlineVisible"),
     inspectorVisible: bool("inspectorVisible"),
+    // Panes default visible; the sidebar defaults expanded.
+    sidebarCollapsed: bool("sidebarCollapsed", false),
+    collapsedFolders,
   }
 }
 
@@ -83,7 +97,11 @@ export function setUiPrefs(
     next.outlineWidth !== prefs.outlineWidth ||
     next.inspectorWidth !== prefs.inspectorWidth ||
     next.outlineVisible !== prefs.outlineVisible ||
-    next.inspectorVisible !== prefs.inspectorVisible
+    next.inspectorVisible !== prefs.inspectorVisible ||
+    next.sidebarCollapsed !== prefs.sidebarCollapsed ||
+    // sanitize always allocates a fresh array — compare contents, not identity.
+    next.collapsedFolders.length !== prefs.collapsedFolders.length ||
+    next.collapsedFolders.some((v, i) => v !== prefs.collapsedFolders[i])
   if (changed) prefs = next
   if (opts?.persist !== false) writeJSON(KEY, prefs)
   if (changed) emit()
@@ -91,4 +109,34 @@ export function setUiPrefs(
 
 export function useUiPrefs(): UiPrefs {
   return useSyncExternalStore(subscribe, () => prefs)
+}
+
+/** Collapse/expand one library folder. */
+export function toggleFolderCollapsed(id: string): void {
+  const cur = prefs.collapsedFolders
+  setUiPrefs({
+    collapsedFolders: cur.includes(id)
+      ? cur.filter((x) => x !== id)
+      : [...cur, id],
+  })
+}
+
+/** Ensure a folder is expanded. Idempotent — callers that need "make visible"
+ *  (e.g. creating a subfolder inside a possibly-collapsed parent) must use
+ *  this, not a guard + toggle: a toggle driven by a stale render-time snapshot
+ *  can invert and collapse the folder instead. */
+export function expandFolder(id: string): void {
+  if (!prefs.collapsedFolders.includes(id)) return
+  setUiPrefs({
+    collapsedFolders: prefs.collapsedFolders.filter((x) => x !== id),
+  })
+}
+
+/** Drop ids of folders that no longer exist (deleted here or out-of-band).
+ *  The sidebar runs this whenever the folder list changes. */
+export function pruneCollapsedFolders(live: ReadonlySet<string>): void {
+  if (prefs.collapsedFolders.every((id) => live.has(id))) return
+  setUiPrefs({
+    collapsedFolders: prefs.collapsedFolders.filter((id) => live.has(id)),
+  })
 }

@@ -57,14 +57,22 @@ import {
   getDoc,
   getSnippet,
   getSnippetBody,
+  listSnippets,
   promoteSnippet,
   reportError,
   updateDocContent,
   updateSnippetFromRegion,
+  updateSnippetNote,
   useLibrary,
   useSaveState,
 } from "@/lib/library"
-import type { SaveState, Snippet } from "@/lib/library"
+import type { DocKind, SaveState, Snippet } from "@/lib/library"
+import {
+  dismissSnippetMatch,
+  effectiveDismissals,
+  findSnippetMatches,
+} from "@/lib/snippet-match"
+import type { MatchCandidate } from "@/lib/snippet-match"
 import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
 import { Button } from "@/components/ui/button"
 import { ResizeHandle } from "@/components/ui/resize-handle"
@@ -96,6 +104,45 @@ const promptFoldGutter = foldGutter({
     return m
   },
 })
+
+/** Scan debounce — longer than the store's 500ms flush, so the scan never
+ *  fires mid-typing-burst. */
+const SCAN_DEBOUNCE_MS = 800
+
+/** One synchronous auto-match pass over a live prompt view: find unmarked
+ *  spans exactly equal to a snippet's canonical body and mark them as linked,
+ *  born-synced regions. One dispatch = one transaction = one updateDocContent
+ *  (linkSig changes → recomputeUsage → usedBy climbs, which is exactly how a
+ *  twice-pasted mark-created snippet surfaces in the sidebar). Idempotent via
+ *  the overlap guard, so StrictMode double-mounts are safe; the scan's own
+ *  effects-only dispatch never reschedules itself (scan runs on docChanged
+ *  only), so there is no loop. */
+function runSnippetScan(docId: string, view: EditorView): void {
+  const doc = getDoc(docId)
+  if (!doc || doc.kind !== "prompt" || doc.readOnly) return
+  const body = view.state.doc.toString()
+  const candidates: MatchCandidate[] = listSnippets().flatMap((s) => {
+    const canonical = getSnippetBody(s.id)
+    return canonical
+      ? [{ snippetId: s.id, name: s.name, version: s.version, body: canonical }]
+      : []
+  })
+  const skip = effectiveDismissals(docId, body, candidates)
+  const matches = findSnippetMatches(
+    body,
+    view.state.field(regionsField),
+    candidates.filter((c) => !skip.has(c.snippetId))
+  )
+  if (matches.length === 0) return
+  // The -i suffix avoids the id collision markSelection's bare timestamp
+  // pattern would hit on a multi-match batch.
+  const stamp = Date.now().toString(36)
+  view.dispatch({
+    effects: matches.map((m, i) =>
+      addRegionEffect.of({ id: `r${stamp}-${i}`, flag: "ok", note: "", ...m })
+    ),
+  })
+}
 
 /** Everything the React chrome needs, read from the CM state in one place. */
 interface Chrome {
@@ -174,6 +221,7 @@ export function PromptEditor({ docId }: { docId: string }) {
     if (!mount || !host || !initial) return
 
     let raf = 0
+    let scanTimer = 0
     const schedule = (view: EditorView) => {
       if (raf) return
       raf = requestAnimationFrame(() => {
@@ -274,6 +322,15 @@ export function PromptEditor({ docId }: { docId: string }) {
             if (u.docChanged || u.geometryChanged || u.selectionSet || hasEffects) {
               schedule(u.view)
             }
+            // Auto-match runs on TEXT changes only — the scan's own
+            // effects-only dispatch can't reschedule itself (no loop).
+            if (u.docChanged) {
+              window.clearTimeout(scanTimer)
+              scanTimer = window.setTimeout(
+                () => runSnippetScan(docId, u.view),
+                SCAN_DEBOUNCE_MS
+              )
+            }
           }),
         ],
       }),
@@ -281,6 +338,9 @@ export function PromptEditor({ docId }: { docId: string }) {
     viewRef.current = view
     registerView(docId, view)
     restoreFolds(view, docId)
+    // Scan on open: content that arrived while this prompt was closed (or
+    // before this feature shipped) gets marked the moment it's looked at.
+    runSnippetScan(docId, view)
     let ribbonFade = 0
     const onScroll = () => {
       schedule(view)
@@ -295,6 +355,7 @@ export function PromptEditor({ docId }: { docId: string }) {
 
     return () => {
       cancelAnimationFrame(raf)
+      window.clearTimeout(scanTimer)
       window.clearTimeout(ribbonFade)
       unregisterView(docId, view)
       viewRef.current = null
@@ -339,12 +400,24 @@ export function PromptEditor({ docId }: { docId: string }) {
   }, [])
 
   // Drop a region's annotation (name/flag/note); the prose it covered stays.
-  const removeRegion = useCallback((id: string) => {
-    const view = viewRef.current
-    if (!view) return
-    view.dispatch({ effects: removeRegionEffect.of(id) })
-    view.focus()
-  }, [])
+  const removeRegion = useCallback(
+    (id: string) => {
+      const view = viewRef.current
+      if (!view) return
+      // Removing a LINKED region in a prompt is a "stop marking this snippet
+      // here" signal — without the dismissal the auto-match scan would re-mark
+      // the still-matching text within a second. Hand-marked regions count
+      // too: their text equals the canonical by construction.
+      const region = view.state.field(regionsField).find((r) => r.id === id)
+      if (region?.snippetId && getDoc(docId)?.kind === "prompt") {
+        const snip = getSnippet(region.snippetId)
+        if (snip) dismissSnippetMatch(docId, region.snippetId, snip.version)
+      }
+      view.dispatch({ effects: removeRegionEffect.of(id) })
+      view.focus()
+    },
+    [docId]
+  )
 
   // Mark a span as a region. Region-first, link-on-resolve: the region is painted
   // synchronously (so it maps through any edits during the await), then — inside a
@@ -448,6 +521,17 @@ export function PromptEditor({ docId }: { docId: string }) {
       await promoteSnippet(region.snippetId)
     } catch (e) {
       reportError(e instanceof Error ? e.message : "Couldn't promote.")
+    }
+  }, [])
+
+  // Commit a snippet's own note (blur-commit from the SnippetDocPanel).
+  const updateNote = useCallback(async (snippetId: string, note: string) => {
+    try {
+      await updateSnippetNote(snippetId, note)
+    } catch (e) {
+      reportError(
+        e instanceof Error ? e.message : "Couldn't save the snippet note."
+      )
     }
   }, [])
 
@@ -591,6 +675,8 @@ export function PromptEditor({ docId }: { docId: string }) {
             <Inspector
               region={activeRegion}
               regionText={chrome?.activeRegionText ?? ""}
+              docId={docId}
+              docKind={doc.kind}
               readOnly={doc.readOnly}
               onPatch={patchRegion}
               onRemove={removeRegion}
@@ -598,6 +684,7 @@ export function PromptEditor({ docId }: { docId: string }) {
               onPush={pushRegion}
               onPromote={promoteRegion}
               onMakeReusable={makeReusable}
+              onUpdateSnippetNote={updateNote}
               className="hidden shrink-0 border-l @3xl:block"
               style={{ width: inspectorWidth, maxWidth: "40%" }}
             />
@@ -855,6 +942,18 @@ function SnippetLink({
         snippet · used in {snippet.usedBy}{" "}
         {snippet.usedBy === 1 ? "place" : "places"} · {label}
       </div>
+      {/* One-way rollup: the snippet's own note, read-only here. To edit it,
+          open the snippet — the region's NOTE below stays prompt-local. */}
+      {snippet.note.trim() !== "" && (
+        <div className="mt-1.5 border-t pt-1.5">
+          <div className="text-[9px] font-semibold tracking-[0.12em] text-muted-foreground">
+            SNIPPET NOTE
+          </div>
+          <p className="mt-0.5 text-[11px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
+            {snippet.note}
+          </p>
+        </div>
+      )}
       {!readOnly && (state !== "synced" || !snippet.library) && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {(state === "update" || state === "diverged") && (
@@ -904,9 +1003,61 @@ function SnippetLink({
   )
 }
 
+// Doc-level panel shown when the SNIPPET ITSELF is open and no region is
+// active: identity, live usage, and the snippet's own note — the source of
+// the one-way rollup that prompt inspectors render read-only.
+function SnippetDocPanel({
+  snippet,
+  readOnly,
+  onUpdateNote,
+}: {
+  snippet: Snippet
+  readOnly: boolean
+  onUpdateNote: (snippetId: string, note: string) => void
+}) {
+  return (
+    <div className="mt-3 space-y-4">
+      <div className="rounded-sm border bg-muted/30 p-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+            {snippet.name}
+          </span>
+          <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+            v{snippet.version}
+          </span>
+        </div>
+        <div className="mt-0.5 text-[10px] text-muted-foreground">
+          used in {snippet.usedBy} {snippet.usedBy === 1 ? "place" : "places"}
+          {snippet.stale > 0 && <> · {snippet.stale} behind</>}
+        </div>
+      </div>
+      <div>
+        <div className="mb-1.5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground">
+          NOTE — WHY THIS EXISTS
+        </div>
+        {/* Uncontrolled + keyed by the committed value: remounts on external
+            change; can't fire mid-typing (only this textarea edits the note). */}
+        <textarea
+          key={snippet.note}
+          defaultValue={snippet.note}
+          disabled={readOnly}
+          onBlur={(e) => {
+            if (e.target.value !== snippet.note)
+              onUpdateNote(snippet.id, e.target.value)
+          }}
+          aria-label="Snippet note"
+          className="min-h-24 w-full resize-y rounded-sm border bg-background p-2 text-xs leading-relaxed focus:border-ring focus:outline-none disabled:opacity-70"
+        />
+      </div>
+    </div>
+  )
+}
+
 function Inspector({
   region,
   regionText,
+  docId,
+  docKind,
   readOnly,
   onPatch,
   onRemove,
@@ -914,11 +1065,14 @@ function Inspector({
   onPush,
   onPromote,
   onMakeReusable,
+  onUpdateSnippetNote,
   className,
   style,
 }: {
   region: RegionInfo | null
   regionText: string
+  docId: string
+  docKind: DocKind
   readOnly: boolean
   onPatch: (id: string, patch: Partial<Region>) => void
   onRemove: (id: string) => void
@@ -926,6 +1080,7 @@ function Inspector({
   onPush: (region: Region) => void
   onPromote: (region: Region) => void
   onMakeReusable: (region: Region) => void
+  onUpdateSnippetNote: (snippetId: string, note: string) => void
   className?: string
   style?: React.CSSProperties
 }) {
@@ -935,6 +1090,9 @@ function Inspector({
     region?.snippetId != null
       ? lib.snippets.find((s) => s.id === region.snippetId)
       : undefined
+  // A snippet doc's id IS its snippet id (docs.set(sr.id, …) on hydrate).
+  const self =
+    docKind === "snippet" ? lib.snippets.find((s) => s.id === docId) : undefined
 
   return (
     <aside className={cn("overflow-y-auto p-4", className)} style={style}>
@@ -942,10 +1100,18 @@ function Inspector({
         INSPECTOR
       </h3>
       {!region ? (
-        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-          Place the cursor inside a region
-          {readOnly ? "." : ", or select text and mark a new one."}
-        </p>
+        self ? (
+          <SnippetDocPanel
+            snippet={self}
+            readOnly={readOnly}
+            onUpdateNote={onUpdateSnippetNote}
+          />
+        ) : (
+          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+            Place the cursor inside a region
+            {readOnly ? "." : ", or select text and mark a new one."}
+          </p>
+        )
       ) : (
         // Key by region id: uncontrolled fields reset when the region changes,
         // but survive re-renders while typing (the prototype's dirty-tracking).

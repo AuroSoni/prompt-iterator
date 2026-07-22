@@ -15,6 +15,8 @@ interface PromptsTable {
     tokens: number
     current_version: number
     sort_order: number
+    /** Containing folder; null = section root. See 0005_folders.sql. */
+    folder_id: string | null
     updated_at: string
   }
   Insert: {
@@ -25,6 +27,7 @@ interface PromptsTable {
     tokens?: number
     current_version?: number
     sort_order?: number
+    folder_id?: string | null
     updated_at?: string
   }
   Update: Partial<PromptsTable["Insert"]>
@@ -70,6 +73,10 @@ interface SnippetsTable {
      *  supabase/migrations/0004_snippet_library.sql. */
     library: boolean
     sort_order: number
+    /** Containing folder; null = section root. See 0005_folders.sql. */
+    folder_id: string | null
+    /** Snippet-level annotation (one-way rollup). See 0006_snippet_note.sql. */
+    note: string
     updated_at: string
   }
   Insert: {
@@ -83,9 +90,35 @@ interface SnippetsTable {
     stale?: number
     library?: boolean
     sort_order?: number
+    folder_id?: string | null
+    note?: string
     updated_at?: string
   }
   Update: Partial<SnippetsTable["Insert"]>
+  Relationships: []
+}
+
+// Per-section folder trees for the library sidebar (0005_folders.sql). The
+// client reparents children before deleting a folder; the FK `set null`
+// actions are only an out-of-band safety net.
+interface FoldersTable {
+  Row: {
+    id: string
+    name: string
+    section: "prompt" | "snippet"
+    parent_id: string | null
+    sort_order: number
+    updated_at: string
+  }
+  Insert: {
+    id: string
+    name: string
+    section: "prompt" | "snippet"
+    parent_id?: string | null
+    sort_order?: number
+    updated_at?: string
+  }
+  Update: Partial<FoldersTable["Insert"]>
   Relationships: []
 }
 
@@ -110,6 +143,7 @@ export interface Database {
       prompts: PromptsTable
       prompt_versions: PromptVersionsTable
       snippets: SnippetsTable
+      folders: FoldersTable
       app_meta: AppMetaTable
     }
     Views: Record<string, never>
