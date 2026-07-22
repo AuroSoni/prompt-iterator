@@ -853,6 +853,30 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null
 const FLUSH_DELAY_MS = 500
 const RETRY_DELAY_MS = 3000
 
+// ---- Per-doc save state (drives the StatusBar indicator) -----------------
+// "saved" is the absent-from-map default so the map only holds exceptions.
+// "local" means the edit landed in localStorage, not the DB (fallback mode).
+
+export type SaveState = "saved" | "dirty" | "saving" | "error" | "local"
+
+const saveStates = new Map<string, SaveState>()
+
+/** Record a transition; returns whether anything actually changed so callers
+ *  can batch one emit() per phase instead of one per doc. */
+function setSaveState(id: string, s: SaveState): boolean {
+  const cur = saveStates.get(id) ?? "saved"
+  if (cur === s) return false
+  if (s === "saved") saveStates.delete(id)
+  else saveStates.set(id, s)
+  return true
+}
+
+/** Reactive save state for one doc. A primitive snapshot, so consumers only
+ *  re-render on real transitions — LibrarySnapshot stays untouched. */
+export function useSaveState(docId: string): SaveState {
+  return useSyncExternalStore(subscribe, () => saveStates.get(docId) ?? "saved")
+}
+
 function scheduleFlush(delay: number = FLUSH_DELAY_MS): void {
   if (flushTimer) clearTimeout(flushTimer)
   flushTimer = setTimeout(flushPending, delay)
@@ -873,6 +897,13 @@ async function runFlush(): Promise<void> {
   const now = new Date().toISOString()
   const writes = [...pending.entries()]
   pending.clear()
+
+  // The drained batch is in flight: one emit for all dirty→saving transitions.
+  let stateChanged = false
+  for (const [id] of writes) {
+    if (setSaveState(id, "saving")) stateChanged = true
+  }
+  if (stateChanged) emit()
 
   const results = await Promise.all(
     writes.map(async ([id, w]) => {
@@ -923,11 +954,24 @@ async function runFlush(): Promise<void> {
     if (!pending.has(r.id)) pending.set(r.id, r.w)
   }
 
+  // Settle save states. A success only lands on "saved" when no newer edit
+  // re-queued mid-flight — that edit already moved the doc back to "dirty"
+  // and must not be shown as saved.
+  let settled = false
+  for (const r of results) {
+    if (r.err) {
+      if (setSaveState(r.id, "error")) settled = true
+    } else if (!pending.has(r.id)) {
+      if (setSaveState(r.id, "saved")) settled = true
+    }
+  }
+
   // Surface (or clear) a non-fatal save error on the same banner channel as
   // hydrate. In persistent mode hydrate succeeded, so `error` was null.
+  // State transitions must always reach subscribers, hence `settled` here.
   const nextError =
     failed.length > 0 ? "Some edits couldn't be saved — retrying…" : null
-  if (nextError !== error || bumped) {
+  if (settled || nextError !== error || bumped) {
     error = nextError
     emit()
   }
@@ -956,14 +1000,15 @@ export function updateDocContent(
   } else if (doc.kind === "snippet") {
     snippets = snippets.map((s) => (s.id === id ? { ...s, tokens } : s))
   }
-  if (linkChanged) recomputeUsage()
-  emit()
-
+  // Queue before the emit so the dirty transition rides the same notify.
   // Only write through when genuinely backed by Supabase (see `persistent`).
   if (persistent && (doc.kind === "prompt" || doc.kind === "snippet")) {
     pending.set(id, { kind: doc.kind, body, regions, tokens })
+    setSaveState(id, "dirty")
     scheduleFlush()
   }
+  if (linkChanged) recomputeUsage()
+  emit()
 }
 
 // ---- Structural writes (create / rename / delete) ------------------------
@@ -1183,6 +1228,7 @@ export async function deleteDoc(id: string): Promise<string[]> {
   }
   // A queued body write for this id must not fire against the deleted row.
   pending.delete(id)
+  saveStates.delete(id)
 
   const removed = [id]
   if (doc.kind === "prompt") {
@@ -1235,6 +1281,7 @@ export function resetLibrary(): void {
     flushTimer = null
   }
   pending.clear()
+  saveStates.clear()
   canonicalBody.clear()
   prompts = []
   snippets = []
