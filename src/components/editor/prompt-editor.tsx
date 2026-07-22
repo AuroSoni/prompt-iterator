@@ -27,6 +27,8 @@ import {
   ArrowUpFromLine,
   BookmarkPlus,
   Lock,
+  PanelLeft,
+  PanelRight,
   Trash2,
 } from "lucide-react"
 
@@ -63,7 +65,9 @@ import {
   useSaveState,
 } from "@/lib/library"
 import type { SaveState, Snippet } from "@/lib/library"
+import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
 import { Button } from "@/components/ui/button"
+import { ResizeHandle } from "@/components/ui/resize-handle"
 import { cn } from "@/lib/utils"
 
 function flagColor(flag: Flag): string {
@@ -137,6 +141,8 @@ function readChrome(view: EditorView, host: HTMLElement): Chrome {
 export function PromptEditor({ docId }: { docId: string }) {
   const doc = getDoc(docId)
   const saveState = useSaveState(docId)
+  const { outlineWidth, inspectorWidth, outlineVisible, inspectorVisible } =
+    useUiPrefs()
   const hostRef = useRef<HTMLDivElement>(null)
   const mountRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
@@ -477,13 +483,31 @@ export function PromptEditor({ docId }: { docId: string }) {
       )}
     >
       <div className="flex min-h-0 flex-1">
-        {!zen && (
-          <Outline
-            regions={chrome?.regions ?? []}
-            activeRegionId={chrome?.activeRegionId ?? null}
-            onJump={jumpTo}
-            className="hidden w-52 shrink-0 border-r @5xl:block"
-          />
+        {!zen && outlineVisible && (
+          <>
+            <Outline
+              regions={chrome?.regions ?? []}
+              activeRegionId={chrome?.activeRegionId ?? null}
+              onJump={jumpTo}
+              className="hidden shrink-0 border-r @5xl:block"
+              // maxWidth mirrors the handle's maxFraction: a stored-wide pane
+              // can't squeeze the editor when the slot narrows.
+              style={{ width: outlineWidth, maxWidth: "35%" }}
+            />
+            <ResizeHandle
+              edge="end"
+              value={outlineWidth}
+              min={UI_LIMITS.outlineWidth.min}
+              max={UI_LIMITS.outlineWidth.max}
+              maxFraction={0.35}
+              defaultValue={UI_LIMITS.outlineWidth.def}
+              onChange={(w, commit) =>
+                setUiPrefs({ outlineWidth: w }, { persist: commit })
+              }
+              label="Resize regions pane"
+              className="-mx-0.5 hidden @5xl:block"
+            />
+          </>
         )}
 
         <div ref={hostRef} className="relative min-w-0 flex-1">
@@ -534,19 +558,35 @@ export function PromptEditor({ docId }: { docId: string }) {
           )}
         </div>
 
-        {!zen && (
-          <Inspector
-            region={activeRegion}
-            regionText={chrome?.activeRegionText ?? ""}
-            readOnly={doc.readOnly}
-            onPatch={patchRegion}
-            onRemove={removeRegion}
-            onPull={pullRegion}
-            onPush={pushRegion}
-            onPromote={promoteRegion}
-            onMakeReusable={makeReusable}
-            className="hidden w-60 shrink-0 border-l @3xl:block"
-          />
+        {!zen && inspectorVisible && (
+          <>
+            <ResizeHandle
+              edge="start"
+              value={inspectorWidth}
+              min={UI_LIMITS.inspectorWidth.min}
+              max={UI_LIMITS.inspectorWidth.max}
+              maxFraction={0.4}
+              defaultValue={UI_LIMITS.inspectorWidth.def}
+              onChange={(w, commit) =>
+                setUiPrefs({ inspectorWidth: w }, { persist: commit })
+              }
+              label="Resize inspector pane"
+              className="-mx-0.5 hidden @3xl:block"
+            />
+            <Inspector
+              region={activeRegion}
+              regionText={chrome?.activeRegionText ?? ""}
+              readOnly={doc.readOnly}
+              onPatch={patchRegion}
+              onRemove={removeRegion}
+              onPull={pullRegion}
+              onPush={pushRegion}
+              onPromote={promoteRegion}
+              onMakeReusable={makeReusable}
+              className="hidden shrink-0 border-l @3xl:block"
+              style={{ width: inspectorWidth, maxWidth: "40%" }}
+            />
+          </>
         )}
       </div>
 
@@ -624,14 +664,16 @@ function Outline({
   activeRegionId,
   onJump,
   className,
+  style,
 }: {
   regions: RegionInfo[]
   activeRegionId: string | null
   onJump: (r: Region) => void
   className?: string
+  style?: React.CSSProperties
 }) {
   return (
-    <nav className={cn("overflow-y-auto py-3", className)}>
+    <nav className={cn("overflow-y-auto py-3", className)} style={style}>
       <h3 className="px-3 pb-2 text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
         REGIONS
       </h3>
@@ -858,6 +900,7 @@ function Inspector({
   onPromote,
   onMakeReusable,
   className,
+  style,
 }: {
   region: RegionInfo | null
   regionText: string
@@ -869,6 +912,7 @@ function Inspector({
   onPromote: (region: Region) => void
   onMakeReusable: (region: Region) => void
   className?: string
+  style?: React.CSSProperties
 }) {
   // Subscribe so the link panel reflects live snippet version/usage counts.
   const lib = useLibrary()
@@ -878,7 +922,7 @@ function Inspector({
       : undefined
 
   return (
-    <aside className={cn("overflow-y-auto p-4", className)}>
+    <aside className={cn("overflow-y-auto p-4", className)} style={style}>
       <h3 className="text-[10px] font-semibold tracking-[0.18em] text-muted-foreground">
         INSPECTOR
       </h3>
@@ -1027,6 +1071,7 @@ function StatusBar({
   readOnly: boolean
   onZen: () => void
 }) {
+  const { outlineVisible, inspectorVisible } = useUiPrefs()
   const flagCounts = FLAGS.filter((f) => f !== "ok")
     .map((f) => ({
       flag: f,
@@ -1062,6 +1107,36 @@ function StatusBar({
           {badge.label}
         </span>
       )}
+      {/* Pane toggles carry their pane's container-query class, so a toggle
+          never shows where the pane couldn't render anyway. */}
+      <button
+        type="button"
+        aria-pressed={outlineVisible}
+        title={outlineVisible ? "Hide regions pane" : "Show regions pane"}
+        aria-label={outlineVisible ? "Hide regions pane" : "Show regions pane"}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setUiPrefs({ outlineVisible: !outlineVisible })}
+        className={cn(
+          "hidden hover:text-foreground @5xl:inline-flex",
+          !outlineVisible && "opacity-50"
+        )}
+      >
+        <PanelLeft className="size-3.5" aria-hidden />
+      </button>
+      <button
+        type="button"
+        aria-pressed={inspectorVisible}
+        title={inspectorVisible ? "Hide inspector pane" : "Show inspector pane"}
+        aria-label={inspectorVisible ? "Hide inspector pane" : "Show inspector pane"}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setUiPrefs({ inspectorVisible: !inspectorVisible })}
+        className={cn(
+          "hidden hover:text-foreground @3xl:inline-flex",
+          !inspectorVisible && "opacity-50"
+        )}
+      >
+        <PanelRight className="size-3.5" aria-hidden />
+      </button>
       <button
         type="button"
         title="Zen focus mode (Alt+Z)"
