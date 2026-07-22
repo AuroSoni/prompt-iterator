@@ -63,6 +63,10 @@ export interface Snippet {
   sortOrder: number
   /** Containing sidebar folder; null = section root. */
   folderId: string | null
+  /** The snippet's OWN annotation — editable on the snippet doc, surfaced
+   *  read-only in prompt inspectors that link it (one-way rollup). Region
+   *  notes are separate and prompt-local (Region.note). */
+  note: string
 }
 
 export type FolderSection = "prompt" | "snippet"
@@ -477,6 +481,7 @@ function buildSeedData(): LibraryData {
       library: true,
       sortOrder: i,
       folderId: null,
+      note: "",
     }
   })
 
@@ -615,6 +620,7 @@ function domainFromRows(
       library: sr.library,
       sortOrder: sr.sort_order,
       folderId: sr.folder_id ?? null,
+      note: sr.note ?? "",
     }
   })
 
@@ -1249,6 +1255,7 @@ export async function createSnippet(name: string): Promise<string> {
       library: true,
       sortOrder,
       folderId: null,
+      note: "",
     },
   ]
   emit()
@@ -1310,6 +1317,7 @@ export async function createSnippetFromText(
       library: false,
       sortOrder,
       folderId: null,
+      note: "",
     },
   ]
   emit()
@@ -1359,6 +1367,26 @@ export async function updateSnippetFromRegion(
   recomputeUsage()
   emit()
   return nextVersion
+}
+
+/** Set a snippet's own note. Await-first (mirrors renameDoc): the row UPDATE
+ *  is confirmed before the store mutates. Commit-on-blur, so no debounce.
+ *  Stored verbatim — notes are prose — except a whitespace-only note collapses
+ *  to "" so the read-only rollup's "only when non-empty" check stays honest. */
+export async function updateSnippetNote(id: string, note: string): Promise<void> {
+  const snip = snippets.find((s) => s.id === id)
+  if (!snip) return
+  const next = note.trim() === "" ? "" : note
+  if (next === snip.note) return
+  if (persistent && supabase) {
+    const { error: e } = await supabase
+      .from("snippets")
+      .update({ note: next })
+      .eq("id", id)
+    if (e) throw e
+  }
+  snippets = snippets.map((s) => (s.id === id ? { ...s, note: next } : s))
+  emit()
 }
 
 /** Rename a prompt or snippet. No-ops on empty/unchanged names and version docs. */

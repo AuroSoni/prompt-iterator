@@ -61,10 +61,11 @@ import {
   reportError,
   updateDocContent,
   updateSnippetFromRegion,
+  updateSnippetNote,
   useLibrary,
   useSaveState,
 } from "@/lib/library"
-import type { SaveState, Snippet } from "@/lib/library"
+import type { DocKind, SaveState, Snippet } from "@/lib/library"
 import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
 import { Button } from "@/components/ui/button"
 import { ResizeHandle } from "@/components/ui/resize-handle"
@@ -451,6 +452,17 @@ export function PromptEditor({ docId }: { docId: string }) {
     }
   }, [])
 
+  // Commit a snippet's own note (blur-commit from the SnippetDocPanel).
+  const updateNote = useCallback(async (snippetId: string, note: string) => {
+    try {
+      await updateSnippetNote(snippetId, note)
+    } catch (e) {
+      reportError(
+        e instanceof Error ? e.message : "Couldn't save the snippet note."
+      )
+    }
+  }, [])
+
   // Make an unlinked region reusable: create a snippet from its text and link it.
   const makeReusable = useCallback(async (region: Region) => {
     const view = viewRef.current
@@ -591,6 +603,8 @@ export function PromptEditor({ docId }: { docId: string }) {
             <Inspector
               region={activeRegion}
               regionText={chrome?.activeRegionText ?? ""}
+              docId={docId}
+              docKind={doc.kind}
               readOnly={doc.readOnly}
               onPatch={patchRegion}
               onRemove={removeRegion}
@@ -598,6 +612,7 @@ export function PromptEditor({ docId }: { docId: string }) {
               onPush={pushRegion}
               onPromote={promoteRegion}
               onMakeReusable={makeReusable}
+              onUpdateSnippetNote={updateNote}
               className="hidden shrink-0 border-l @3xl:block"
               style={{ width: inspectorWidth, maxWidth: "40%" }}
             />
@@ -855,6 +870,18 @@ function SnippetLink({
         snippet · used in {snippet.usedBy}{" "}
         {snippet.usedBy === 1 ? "place" : "places"} · {label}
       </div>
+      {/* One-way rollup: the snippet's own note, read-only here. To edit it,
+          open the snippet — the region's NOTE below stays prompt-local. */}
+      {snippet.note.trim() !== "" && (
+        <div className="mt-1.5 border-t pt-1.5">
+          <div className="text-[9px] font-semibold tracking-[0.12em] text-muted-foreground">
+            SNIPPET NOTE
+          </div>
+          <p className="mt-0.5 text-[11px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
+            {snippet.note}
+          </p>
+        </div>
+      )}
       {!readOnly && (state !== "synced" || !snippet.library) && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {(state === "update" || state === "diverged") && (
@@ -904,9 +931,61 @@ function SnippetLink({
   )
 }
 
+// Doc-level panel shown when the SNIPPET ITSELF is open and no region is
+// active: identity, live usage, and the snippet's own note — the source of
+// the one-way rollup that prompt inspectors render read-only.
+function SnippetDocPanel({
+  snippet,
+  readOnly,
+  onUpdateNote,
+}: {
+  snippet: Snippet
+  readOnly: boolean
+  onUpdateNote: (snippetId: string, note: string) => void
+}) {
+  return (
+    <div className="mt-3 space-y-4">
+      <div className="rounded-sm border bg-muted/30 p-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+            {snippet.name}
+          </span>
+          <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+            v{snippet.version}
+          </span>
+        </div>
+        <div className="mt-0.5 text-[10px] text-muted-foreground">
+          used in {snippet.usedBy} {snippet.usedBy === 1 ? "place" : "places"}
+          {snippet.stale > 0 && <> · {snippet.stale} behind</>}
+        </div>
+      </div>
+      <div>
+        <div className="mb-1.5 text-[10px] font-semibold tracking-[0.16em] text-muted-foreground">
+          NOTE — WHY THIS EXISTS
+        </div>
+        {/* Uncontrolled + keyed by the committed value: remounts on external
+            change; can't fire mid-typing (only this textarea edits the note). */}
+        <textarea
+          key={snippet.note}
+          defaultValue={snippet.note}
+          disabled={readOnly}
+          onBlur={(e) => {
+            if (e.target.value !== snippet.note)
+              onUpdateNote(snippet.id, e.target.value)
+          }}
+          aria-label="Snippet note"
+          className="min-h-24 w-full resize-y rounded-sm border bg-background p-2 text-xs leading-relaxed focus:border-ring focus:outline-none disabled:opacity-70"
+        />
+      </div>
+    </div>
+  )
+}
+
 function Inspector({
   region,
   regionText,
+  docId,
+  docKind,
   readOnly,
   onPatch,
   onRemove,
@@ -914,11 +993,14 @@ function Inspector({
   onPush,
   onPromote,
   onMakeReusable,
+  onUpdateSnippetNote,
   className,
   style,
 }: {
   region: RegionInfo | null
   regionText: string
+  docId: string
+  docKind: DocKind
   readOnly: boolean
   onPatch: (id: string, patch: Partial<Region>) => void
   onRemove: (id: string) => void
@@ -926,6 +1008,7 @@ function Inspector({
   onPush: (region: Region) => void
   onPromote: (region: Region) => void
   onMakeReusable: (region: Region) => void
+  onUpdateSnippetNote: (snippetId: string, note: string) => void
   className?: string
   style?: React.CSSProperties
 }) {
@@ -935,6 +1018,9 @@ function Inspector({
     region?.snippetId != null
       ? lib.snippets.find((s) => s.id === region.snippetId)
       : undefined
+  // A snippet doc's id IS its snippet id (docs.set(sr.id, …) on hydrate).
+  const self =
+    docKind === "snippet" ? lib.snippets.find((s) => s.id === docId) : undefined
 
   return (
     <aside className={cn("overflow-y-auto p-4", className)} style={style}>
@@ -942,10 +1028,18 @@ function Inspector({
         INSPECTOR
       </h3>
       {!region ? (
-        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-          Place the cursor inside a region
-          {readOnly ? "." : ", or select text and mark a new one."}
-        </p>
+        self ? (
+          <SnippetDocPanel
+            snippet={self}
+            readOnly={readOnly}
+            onUpdateNote={onUpdateSnippetNote}
+          />
+        ) : (
+          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+            Place the cursor inside a region
+            {readOnly ? "." : ", or select text and mark a new one."}
+          </p>
+        )
       ) : (
         // Key by region id: uncontrolled fields reset when the region changes,
         // but survive re-renders while typing (the prototype's dirty-tracking).

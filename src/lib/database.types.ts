@@ -75,6 +75,8 @@ interface SnippetsTable {
     sort_order: number
     /** Containing folder; null = section root. See 0005_folders.sql. */
     folder_id: string | null
+    /** Snippet-level annotation (one-way rollup). See 0006_snippet_note.sql. */
+    note: string
     updated_at: string
   }
   Insert: {
@@ -89,6 +91,7 @@ interface SnippetsTable {
     library?: boolean
     sort_order?: number
     folder_id?: string | null
+    note?: string
     updated_at?: string
   }
   Update: Partial<SnippetsTable["Insert"]>
