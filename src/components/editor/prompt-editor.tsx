@@ -21,6 +21,7 @@ import {
   lineNumbers,
 } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
+import { foldedRanges, foldGutter, foldKeymap } from "@codemirror/language"
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -46,6 +47,7 @@ import {
   updateRegionEffect,
 } from "@/lib/editor"
 import type { Flag, Region, RegionInfo, RibbonSegment } from "@/lib/editor"
+import { promptFolding, restoreFolds, saveFolds } from "@/lib/fold"
 import { promptLanguage } from "@/lib/language"
 import {
   createSnippetFromText,
@@ -72,6 +74,7 @@ function flagColor(flag: Flag): string {
 const modeCompartment = new Compartment()
 const cockpitExtras = () => [
   lineNumbers(),
+  foldGutter(),
   highlightActiveLine(),
   highlightActiveLineGutter(),
 ]
@@ -202,21 +205,37 @@ export function PromptEditor({ docId }: { docId: string }) {
               },
             },
           ]),
-          keymap.of([...defaultKeymap, ...historyKeymap]),
+          keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap]),
           modeCompartment.of(cockpitExtras()),
           EditorView.lineWrapping,
           EditorState.readOnly.of(initial.readOnly),
           EditorView.editable.of(!initial.readOnly),
           promptLanguage(),
+          promptFolding(),
           regionExtensions(initial.regions),
           EditorView.updateListener.of((u) => {
             const hasEffects = u.transactions.some((t) => t.effects.length > 0)
-            if (u.docChanged || hasEffects) {
+            // The store write triggers on doc edits and REGION effects only.
+            // Triggering on any effect would turn fold/unfold gestures (and
+            // zen reconfigures, scrollIntoView) into no-op Supabase UPDATEs.
+            const hasRegionEffects = u.transactions.some((t) =>
+              t.effects.some(
+                (e) =>
+                  e.is(addRegionEffect) ||
+                  e.is(updateRegionEffect) ||
+                  e.is(removeRegionEffect)
+              )
+            )
+            if (u.docChanged || hasRegionEffects) {
               updateDocContent(
                 docId,
                 u.state.doc.toString(),
                 u.state.field(regionsField)
               )
+            }
+            // Fold changes are view-state: persisted locally, never to the DB.
+            if (foldedRanges(u.state) !== foldedRanges(u.startState)) {
+              saveFolds(docId, u.state)
             }
             if (u.docChanged || u.geometryChanged || u.selectionSet || hasEffects) {
               schedule(u.view)
@@ -227,6 +246,7 @@ export function PromptEditor({ docId }: { docId: string }) {
     })
     viewRef.current = view
     registerView(docId, view)
+    restoreFolds(view, docId)
     let ribbonFade = 0
     const onScroll = () => {
       schedule(view)

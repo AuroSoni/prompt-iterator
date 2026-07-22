@@ -202,6 +202,21 @@
     border-right: 1px solid var(--border);
     padding-right: 4px;
 }
+.prompt-editor .cm-foldGutter .cm-gutterElement {
+    cursor: pointer;
+    color: color-mix(in oklch, var(--muted-foreground) 50%, transparent);
+}
+.prompt-editor .cm-foldGutter .cm-gutterElement:hover {
+    color: var(--foreground);
+}
+.prompt-editor .cm-foldPlaceholder {
+    background: var(--muted);
+    border: 1px solid var(--border);
+    color: var(--muted-foreground);
+    border-radius: 4px;
+    padding: 0 6px;
+    margin: 0 4px;
+}
 .prompt-editor .cm-activeLine {
     background: color-mix(in oklch, var(--foreground) 4%, transparent);
 }
