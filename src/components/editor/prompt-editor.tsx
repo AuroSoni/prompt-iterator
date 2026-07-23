@@ -22,7 +22,7 @@ import {
 } from "@codemirror/view"
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
 import { foldedRanges, foldGutter, foldKeymap } from "@codemirror/language"
-import { Lock, PanelLeft, PanelRight } from "lucide-react"
+import { Keyboard, Lock, PanelLeft, PanelRight } from "lucide-react"
 
 import {
   addRegionEffect,
@@ -74,9 +74,12 @@ import {
 } from "@/lib/snippet-match"
 import type { MatchCandidate } from "@/lib/snippet-match"
 import { findExtension } from "@/lib/find"
+import { foldChordKeymap } from "@/lib/fold-commands"
+import { formatKeymap } from "@/lib/format"
 import { regionHover } from "@/lib/hover"
 import { UI_LIMITS, setUiPrefs, useUiPrefs } from "@/lib/ui-prefs"
 import { FindBar } from "@/components/editor/find-bar"
+import { ShortcutCheatsheet } from "@/components/editor/shortcut-cheatsheet"
 import { Inspector } from "@/components/editor/inspector"
 import { RegionPopover } from "@/components/editor/region-popover"
 import { ResizeHandle } from "@/components/ui/resize-handle"
@@ -241,6 +244,7 @@ export function PromptEditor({ docId }: { docId: string }) {
   const [findOpen, setFindOpen] = useState(false)
   const [findReplace, setFindReplace] = useState(false)
   const [docEpoch, setDocEpoch] = useState(0)
+  const [cheatsheetOpen, setCheatsheetOpen] = useState(false)
   // Region popover: target region id + frozen open-time anchor coords
   // (host-relative). Coords are frozen so the popover doesn't chase the caret.
   const [popover, setPopover] = useState<{
@@ -254,6 +258,7 @@ export function PromptEditor({ docId }: { docId: string }) {
   const zenRef = useRef(zen)
   const xrayRef = useRef(xray)
   const findOpenRef = useRef(findOpen)
+  const cheatsheetOpenRef = useRef(cheatsheetOpen)
   const popoverRef = useRef(popover)
   const popoverOpenedAt = useRef(0)
   const openPopoverRef = useRef<() => boolean>(() => false)
@@ -338,9 +343,21 @@ export function PromptEditor({ docId }: { docId: string }) {
               },
             },
             {
+              // F1 opens the shortcut cheatsheet; ? can't bind (printable).
+              key: "F1",
+              run: () => {
+                setCheatsheetOpen(true)
+                return true
+              },
+            },
+            {
               key: "Escape",
               run: () => {
-                // Close the find bar first, then peel modes.
+                // Close the cheatsheet, then the find bar, then peel modes.
+                if (cheatsheetOpenRef.current) {
+                  setCheatsheetOpen(false)
+                  return true
+                }
                 if (findOpenRef.current) {
                   setFindOpen(false)
                   return true
@@ -357,6 +374,9 @@ export function PromptEditor({ docId }: { docId: string }) {
               },
             },
           ]),
+          // Fold power-commands (Ctrl+K chords) + format (Shift+Alt+F). Above
+          // the default bundle; every key here is unbound elsewhere, no shadowing.
+          keymap.of([...foldChordKeymap, ...formatKeymap]),
           keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap]),
           modeCompartment.of(cockpitExtras()),
           // After the compartment: gutters render in extension order, so line
@@ -461,6 +481,10 @@ export function PromptEditor({ docId }: { docId: string }) {
   useEffect(() => {
     findOpenRef.current = findOpen
   }, [findOpen])
+
+  useEffect(() => {
+    cheatsheetOpenRef.current = cheatsheetOpen
+  }, [cheatsheetOpen])
 
   useEffect(() => {
     popoverRef.current = popover
@@ -824,6 +848,25 @@ export function PromptEditor({ docId }: { docId: string }) {
               Alt+X x-ray · Esc exit
             </div>
           )}
+          {/* Shortcut discovery: ? button (cockpit) + the F1 cheatsheet. */}
+          {!zen && (
+            <button
+              type="button"
+              aria-label="Keyboard shortcuts (F1)"
+              title="Keyboard shortcuts (F1)"
+              onClick={() => setCheatsheetOpen(true)}
+              className="absolute bottom-2 right-6 z-20 grid size-7 place-items-center rounded-md border bg-card text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground"
+            >
+              <Keyboard className="size-3.5" />
+            </button>
+          )}
+          <ShortcutCheatsheet
+            open={cheatsheetOpen}
+            onClose={() => {
+              setCheatsheetOpen(false)
+              view?.focus()
+            }}
+          />
           {!doc.readOnly && chrome?.pill && !popover && (
             <button
               type="button"
