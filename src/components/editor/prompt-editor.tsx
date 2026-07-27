@@ -130,12 +130,17 @@ function runSnippetScan(docId: string, view: EditorView): void {
   const doc = getDoc(docId)
   if (!doc || doc.kind !== "prompt" || doc.readOnly) return
   const body = view.state.doc.toString()
-  const candidates: MatchCandidate[] = listSnippets().flatMap((s) => {
-    const canonical = getSnippetBody(s.id)
-    return canonical
-      ? [{ snippetId: s.id, name: s.name, version: s.version, body: canonical }]
-      : []
-  })
+  // Only snippets the user deliberately curated into the library auto-link.
+  // Leftover library:false snippets (e.g. from the old mark-creates-a-snippet
+  // behavior) must never re-attach themselves to hand-marked comment text.
+  const candidates: MatchCandidate[] = listSnippets()
+    .filter((s) => s.library)
+    .flatMap((s) => {
+      const canonical = getSnippetBody(s.id)
+      return canonical
+        ? [{ snippetId: s.id, name: s.name, version: s.version, body: canonical }]
+        : []
+    })
   const skip = effectiveDismissals(docId, body, candidates)
   const matches = findSnippetMatches(
     body,
@@ -570,25 +575,23 @@ export function PromptEditor({ docId }: { docId: string }) {
     [docId]
   )
 
-  // Mark a span as a region. Region-first, link-on-resolve: the region is painted
-  // synchronously (so it maps through any edits during the await), then — inside a
-  // prompt — a snippet is created and its id attached. Marking inside a snippet
-  // stays a plain local region (flat v1). Failure leaves it unlinked.
-  // Returns the new region's id synchronously (the popover opens on it while
-  // the snippet link resolves in the background).
+  // Mark a span as a region: a pure annotation, left UNLINKED. Marking no longer
+  // creates a snippet — snippets are born only from explicit actions ("Make
+  // reusable" in the Inspector, "New snippet" in the sidebar) and linked via
+  // insert-from-library. Marking inside a snippet doc was already a plain local
+  // region. Returns the new region's id synchronously so the popover opens on it.
   const markSelection = useCallback((): string | null => {
     const view = viewRef.current
     if (!view) return null
     const { from, to } = view.state.selection.main
     if (from === to) return null
-    // Overlapping regions make "which snippet owns this text" ambiguous.
+    // Overlapping regions make region ownership of the text ambiguous.
     if (regionsOverlap(view.state.field(regionsField), from, to)) return null
     const id = `r${Date.now().toString(36)}`
-    const text = view.state.doc.sliceString(from, to)
     view.dispatch({
       effects: addRegionEffect.of({
         id,
-        name: "new-region",
+        name: "note",
         flag: "ok",
         note: "",
         from,
@@ -597,28 +600,8 @@ export function PromptEditor({ docId }: { docId: string }) {
       selection: { anchor: to },
     })
     view.focus()
-    if (getDoc(docId)?.kind === "prompt") {
-      void (async () => {
-        try {
-          const { id: snippetId, version } = await createSnippetFromText(
-            "new-region",
-            text
-          )
-          viewRef.current?.dispatch({
-            effects: updateRegionEffect.of({
-              id,
-              patch: { snippetId, syncedVersion: version },
-            }),
-          })
-        } catch (e) {
-          reportError(
-            e instanceof Error ? e.message : "Couldn't create the snippet."
-          )
-        }
-      })()
-    }
     return id
-  }, [docId])
+  }, [])
 
   // Open the mark/edit popover at the caret: an existing region under the
   // head (or overlapped by the selection) is edited; a plain selection is
