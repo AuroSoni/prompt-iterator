@@ -10,6 +10,7 @@ import type { EditorState, Extension, Range } from "@codemirror/state"
 import { Decoration, EditorView } from "@codemirror/view"
 
 import { regionsField } from "@/lib/editor"
+import { unfoldAt } from "@/lib/fold"
 
 export interface FindOpts {
   caseSense: boolean
@@ -157,8 +158,8 @@ export function clearFind(view: EditorView): void {
   view.dispatch({ effects: setFindEffect.of({ matches: [], current: -1 }) })
 }
 
-/** Highlight match `idx` (wrapping) and scroll it into view. Returns the
- *  normalized index, or -1 when there are no matches. */
+/** Highlight match `idx` (wrapping), reveal it, and scroll it into view.
+ *  Returns the normalized index, or -1 when there are no matches. */
 export function gotoMatch(
   view: EditorView,
   matches: FindMatch[],
@@ -166,6 +167,13 @@ export function gotoMatch(
 ): number {
   if (!matches.length) return -1
   const i = ((idx % matches.length) + matches.length) % matches.length
+  // Unfold FIRST, in its own transaction: a match inside a collapsed section is
+  // replaced by the fold placeholder, so it has no DOM box — the current-match
+  // mark would paint onto nothing and scrollIntoView would resolve to the
+  // placeholder's line. Separate transaction so the scroll below is measured
+  // against unfolded geometry. unfoldAt clears every fold OVERLAPPING the span,
+  // so a match nested two folds deep needs no special casing.
+  unfoldAt(view, matches[i].from, matches[i].to)
   view.dispatch({
     effects: [
       setFindEffect.of({ matches, current: i }),
