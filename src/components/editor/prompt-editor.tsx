@@ -20,7 +20,8 @@ import {
   keymap,
   lineNumbers,
 } from "@codemirror/view"
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands"
+import type { KeyBinding } from "@codemirror/view"
+import { defaultKeymap, history, historyKeymap, redo } from "@codemirror/commands"
 import { foldedRanges, foldGutter, foldKeymap } from "@codemirror/language"
 import { Keyboard, Lock, PanelLeft, PanelRight } from "lucide-react"
 
@@ -113,6 +114,17 @@ const promptFoldGutter = foldGutter({
     return m
   },
 })
+
+/** CodeMirror's historyKeymap gives redo Ctrl+Y on Windows, Cmd+Shift+Z on
+ *  mac, and Ctrl+Shift+Z on Linux only — so the chord most editors (VS Code
+ *  included) accept everywhere is dead on Windows. Bind it on every platform
+ *  as a second redo chord; Ctrl+Y keeps working. Placed BEFORE historyKeymap
+ *  so the duplicate it creates on mac/Linux resolves here first — same
+ *  command either way, so the overlap is harmless. `preventDefault` matches
+ *  the built-in history bindings: the browser's own redo must not also fire. */
+const redoKeymap: KeyBinding[] = [
+  { key: "Mod-Shift-z", run: redo, preventDefault: true },
+]
 
 /** Scan debounce — longer than the store's 500ms flush, so the scan never
  *  fires mid-typing-burst. */
@@ -382,7 +394,12 @@ export function PromptEditor({ docId }: { docId: string }) {
           // Fold power-commands (Ctrl+K chords) + format (Shift+Alt+F). Above
           // the default bundle; every key here is unbound elsewhere, no shadowing.
           keymap.of([...foldChordKeymap, ...formatKeymap]),
-          keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap]),
+          keymap.of([
+            ...defaultKeymap,
+            ...redoKeymap,
+            ...historyKeymap,
+            ...foldKeymap,
+          ]),
           modeCompartment.of(cockpitExtras()),
           // After the compartment: gutters render in extension order, so line
           // numbers stay left of the fold gutter in cockpit mode.
