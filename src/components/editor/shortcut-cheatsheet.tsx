@@ -20,6 +20,10 @@ interface Shortcut {
   label: string
 }
 
+const IS_MAC =
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent)
+
 const GROUPS: { title: string; items: Shortcut[] }[] = [
   {
     title: "Folding",
@@ -51,7 +55,10 @@ const GROUPS: { title: string; items: Shortcut[] }[] = [
       { combos: ["Shift+Alt+A"], label: "Toggle block comment" },
       { combos: ["Ctrl+Alt+↑", "Ctrl+Alt+↓"], label: "Add cursor above / below" },
       { combos: ["Ctrl+Shift+K"], label: "Delete line" },
-      { combos: ["Ctrl+Z", "Ctrl+Y"], label: "Undo / redo" },
+      { combos: ["Ctrl+Z"], label: "Undo" },
+      // Ctrl+Y is a Windows/Linux binding — on mac it would render as ⌘+Y,
+      // which redoes nothing. Ctrl+Shift+Z is bound on every platform.
+      { combos: IS_MAC ? ["Ctrl+Shift+Z"] : ["Ctrl+Shift+Z", "Ctrl+Y"], label: "Redo" },
     ],
   },
   {
@@ -68,10 +75,6 @@ const GROUPS: { title: string; items: Shortcut[] }[] = [
     ],
   },
 ]
-
-const IS_MAC =
-  typeof navigator !== "undefined" &&
-  /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent)
 
 /** Windows key labels → mac glyphs, applied before splitting so chords stay intact. */
 const forPlatform = (combo: string) =>
