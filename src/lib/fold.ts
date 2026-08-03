@@ -175,11 +175,21 @@ interface StoredFolds {
 
 const foldKey = (docId: string) => `pw:v1:fold:${docId}`
 
+/** Document order, the order restoreFolds must replay them in. */
+const byPosition = (a: [number, number], b: [number, number]) =>
+  a[0] - b[0] || a[1] - b[1]
+
 export function saveFolds(docId: string, state: EditorState): void {
   const ranges: [number, number][] = []
   foldedRanges(state).between(0, state.doc.length, (from, to) => {
     ranges.push([from, to])
   })
+  // NOT already in document order: a RangeSet puts an overlapping range in a
+  // second layer, and between() drains each layer before descending into the
+  // next. So a nested fold (a <tag> inside a folded heading) comes out after
+  // its later siblings — [[8,51],[60,85],[17,25]]. restoreFolds replays this
+  // array as one batch of foldEffects, which CodeMirror requires sorted.
+  ranges.sort(byPosition)
   if (ranges.length === 0) {
     removeKey(foldKey(docId))
   } else {
@@ -199,11 +209,16 @@ export function restoreFolds(view: EditorView, docId: string): void {
   // StrictMode double-mount guard: the second mount sees the survivor view
   // already folded — dispatching again would stack duplicate fold marks.
   if (foldedRanges(view.state).size > 0) return
+  // Sort on the way in too, not just in saveFolds: entries written before that
+  // fix are already unsorted in real browsers, and replaying one throws
+  // "Ranges must be added sorted by `from` position and `startSide`" out of the
+  // mount transaction, which kills the pane. Sorting here repairs them in place.
   const effects = stored.ranges
     .filter(
       (r): r is [number, number] =>
         Array.isArray(r) && r.length === 2 && r[0] >= 0 && r[0] < r[1] && r[1] <= len
     )
+    .sort(byPosition)
     .map(([from, to]) => foldEffect.of({ from, to }))
   if (effects.length > 0) view.dispatch({ effects })
 }
