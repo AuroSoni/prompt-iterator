@@ -27,24 +27,33 @@ being up.
 
 ## Core model
 
-**A prompt is a continuous document with named regions painted over spans of it —
-and every region is a snippet.**
+**A prompt is a continuous document with named regions painted over spans of it.
+Regions are annotation; reuse is a separate, deliberate step.**
 
 Not a stack of blocks. You write prose freely; regions are an annotation layer on
-top, so text can exist outside any region and regions can be ragged. Marking a
-span promotes it: a region *is* a reference to a snippet, and the snippet holds the
-canonical text.
+top, so text can exist outside any region and regions can be ragged. Marking a span
+names it and gives it somewhere to hang a note — nothing more. A region *may* also
+be linked to a snippet, but marking never creates one on your behalf.
 
 - **Prompt** — a document, versioned as a whole
-- **Region** — a named, marked span within a prompt; it references a **snippet**
-- **Snippet** — the canonical, independently-versioned text a region is an
-  occurrence of. Marking a span creates one; marking (or inserting) the same text
-  elsewhere links back to the same snippet
+- **Region** — a named, marked span within a prompt, carrying a note and a flag.
+  Standalone by default; optionally linked to a **snippet**
+- **Snippet** — canonical, independently-versioned text that linked regions are
+  occurrences of. Born only from an explicit act: **Make reusable snippet** on a
+  region, or **New snippet** in the library
 - **Version** — an immutable snapshot of a whole prompt
 
+A region becomes linked in one of three ways: promoting it with **Make reusable
+snippet**; **inserting** a snippet from the library at the cursor; or the editor's
+**automatic match**, which links a span whose text is exactly the canonical body of
+a snippet you keep in the library (dismissible per span, and only curated library
+snippets are candidates). Promoting text that already matches a snippet links to
+that snippet rather than creating a duplicate.
+
 The **library** lists only *shared* snippets — those used in two or more places, or
-ones you explicitly keep. One-off regions stay out of the way. Regions are flat:
-marking inside a snippet is a plain local annotation, not a nested sub-snippet (v1).
+ones you explicitly keep; a freshly promoted one-off stays out of the way until it
+is reused. Regions are flat: marking inside a snippet is a plain local annotation,
+not a nested sub-snippet (v1).
 
 ### Snippet reuse: copy + staleness
 
@@ -66,10 +75,15 @@ distance.
 ### Editor
 
 - Continuous long-form text editor, comfortable for multi-thousand-token documents
-- Select a span → mark it as a named region; marking creates (or links to) a snippet
+- Select a span → mark it as a named region. Marking is annotation only: it neither
+  creates a snippet nor links to one
 - Regions carry a **note** (why this exists / what it's for)
 - Regions carry a **flag**: `ok` / `suspect` / `stale` / `revisit`
+- Promote a region to reusable text with **Make reusable snippet** — the one action
+  that turns a region into a snippet
 - Insert a snippet from the library at the cursor (as a linked region)
+- Text matching a library snippet's canonical body is auto-linked as a region; the
+  match is dismissible per span
 - **Pull** a snippet's current text into a region, or **push** a region's edits back
   up to the snippet
 - Flat regions only — no nesting in v1
