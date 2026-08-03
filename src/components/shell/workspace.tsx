@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useImperativeHandle, useRef } from "react"
 import type { Ref } from "react"
-import { DockviewReact, themeLightSpaced } from "dockview-react"
+import {
+  DockviewReact,
+  themeAbyssSpaced,
+  themeLightSpaced,
+} from "dockview-react"
 import type {
   DockviewApi,
   DockviewReadyEvent,
@@ -17,6 +21,7 @@ import {
 } from "@/components/shell/editor-slot"
 import { firstPromptId, getDoc } from "@/lib/library"
 import { readJSON, removeKey, writeJSON } from "@/lib/local"
+import { useTheme } from "@/lib/theme"
 
 /** The shell holds at most four generic editor slots (Phase 0 decision). */
 export const MAX_SLOTS = 4
@@ -84,6 +89,7 @@ export function Workspace({
   onOpenDocsChange,
   onActiveDocChange,
 }: WorkspaceProps) {
+  const { resolved } = useTheme()
   const apiRef = useRef<DockviewApi | null>(null)
   // Latest callbacks in a ref so dockview event subscriptions never go stale.
   const callbacksRef = useRef({ onOpenDocsChange, onActiveDocChange })
@@ -245,7 +251,11 @@ export function Workspace({
   return (
     <DockviewReact
       className="workspace-dockview"
-      theme={themeLightSpaced}
+      // The two spaced themes are identical apart from name/className/
+      // colorScheme (same gap, same dnd behaviour), and .workspace-dockview in
+      // index.css overrides the dv-* colors from our own tokens either way —
+      // so this swap is purely about colorScheme and the few vars we don't map.
+      theme={resolved === "dark" ? themeAbyssSpaced : themeLightSpaced}
       components={components}
       tabComponents={tabComponents}
       watermarkComponent={WorkspaceWatermark}

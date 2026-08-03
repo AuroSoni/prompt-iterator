@@ -37,6 +37,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { KindBadge } from "@/components/shell/editor-slot"
+import { ThemeToggle } from "@/components/shell/theme-toggle"
 import { ResizeHandle } from "@/components/ui/resize-handle"
 import {
   useRowDnd,
@@ -939,6 +940,9 @@ export function LibrarySidebar({
         >
           <PanelLeftOpen />
         </Button>
+        {/* The rail is the whole UI while collapsed, so the theme control has
+            to live here too — otherwise switching means expanding first. */}
+        <ThemeToggle orientation="vertical" className="mt-auto" />
       </aside>
     )
   }
@@ -1026,19 +1030,24 @@ export function LibrarySidebar({
         </div>
       </nav>
 
-      {onSignOut && (
-        <div className="shrink-0 border-t p-2">
+      {/* Always rendered: the theme control lives here whether or not auth is
+          configured, so the footer is no longer conditional on onSignOut. */}
+      <div className="flex shrink-0 items-center justify-between gap-2 border-t p-2">
+        {onSignOut ? (
           <Button
             variant="ghost"
             size="sm"
             onClick={onSignOut}
-            className="w-full justify-start gap-2 text-muted-foreground"
+            className="min-w-0 flex-1 justify-start gap-2 text-muted-foreground"
           >
             <LogOut className="size-3.5" />
             Sign out
           </Button>
-        </div>
-      )}
+        ) : (
+          <span />
+        )}
+        <ThemeToggle />
+      </div>
 
       <AlertDialog
         open={deleteTarget !== null}

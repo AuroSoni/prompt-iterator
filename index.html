@@ -5,6 +5,24 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>prompt-iterator</title>
+    <script>
+      // Pre-paint theme resolution. The app bundle is deferred, so without this
+      // a dark-mode user sees a white flash before src/lib/theme.ts runs. Must
+      // stay in sync with THEME_KEY and computeState() there. Never throws:
+      // storage can be disabled, and a broken theme must not break boot.
+      try {
+        var p = JSON.parse(localStorage.getItem('pw:v1:theme'))
+        if (
+          p === 'dark' ||
+          ((p === 'system' || p === null) &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches)
+        ) {
+          document.documentElement.classList.add('dark')
+        }
+      } catch (e) {
+        /* no stored preference, or storage is unavailable — start light */
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
