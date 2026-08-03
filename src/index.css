@@ -51,6 +51,7 @@
 }
 
 :root {
+    color-scheme: light;
     --background: oklch(1 0 0);
     --foreground: oklch(0.145 0 0);
     --card: oklch(1 0 0);
@@ -85,38 +86,48 @@
     --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* Dark theme "Vellum" (design-shotgun 2026-08-03, variant D of five).
+   A deliberately DIM theme, not a black one: the canvas sits at L .255 and the
+   text at L .89, a narrow range chosen to cut the glare you get staring at a
+   bright editor pane on a near-black page for an hour. Greys carry a faint
+   250° tint so the shell reads as one material. Syntax chroma is roughly half
+   the light theme's, which leaves the region flag tints as the loudest color
+   in a doc — the signal this tool exists to surface. */
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.556 0 0);
-    --chart-1: oklch(0.87 0 0);
-    --chart-2: oklch(0.556 0 0);
-    --chart-3: oklch(0.439 0 0);
-    --chart-4: oklch(0.371 0 0);
-    --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.556 0 0);
+    color-scheme: dark;
+    --background: oklch(0.255 0.006 250);
+    --foreground: oklch(0.89 0.008 250);
+    --card: oklch(0.295 0.007 250);
+    --card-foreground: oklch(0.89 0.008 250);
+    --popover: oklch(0.315 0.008 250);
+    --popover-foreground: oklch(0.93 0.008 250);
+    --primary: oklch(0.78 0.06 230);
+    --primary-foreground: oklch(0.24 0.01 250);
+    --secondary: oklch(0.345 0.008 250);
+    --secondary-foreground: oklch(0.93 0.008 250);
+    --muted: oklch(0.345 0.008 250);
+    --muted-foreground: oklch(0.7 0.01 250);
+    --accent: oklch(0.375 0.009 250);
+    --accent-foreground: oklch(0.94 0.008 250);
+    --destructive: oklch(0.7 0.11 25);
+    /* Opaque borders, not white/10%: a translucent hairline reads at a
+       different strength on every surface in a dim theme. */
+    --border: oklch(0.385 0.009 250);
+    --input: oklch(0.41 0.01 250);
+    --ring: oklch(0.62 0.05 235);
+    --chart-1: oklch(0.78 0.06 230);
+    --chart-2: oklch(0.7 0.01 250);
+    --chart-3: oklch(0.6 0.01 250);
+    --chart-4: oklch(0.5 0.01 250);
+    --chart-5: oklch(0.41 0.01 250);
+    --sidebar: oklch(0.275 0.006 250);
+    --sidebar-foreground: oklch(0.89 0.008 250);
+    --sidebar-primary: oklch(0.78 0.06 230);
+    --sidebar-primary-foreground: oklch(0.24 0.01 250);
+    --sidebar-accent: oklch(0.345 0.008 250);
+    --sidebar-accent-foreground: oklch(0.94 0.008 250);
+    --sidebar-border: oklch(0.375 0.009 250);
+    --sidebar-ring: oklch(0.62 0.05 235);
 }
 
 @layer base {
@@ -169,16 +180,19 @@
     --md-tag: oklch(0.511 0.096 186.391);       /* teal-700 */
     --md-string: oklch(0.527 0.154 150.069);    /* green-700 */
 }
+/* Vellum's muted syntax: same hue wheel as the light theme, chroma pulled to
+   ~.07–.11 and lightness held near .75 so no single token shouts. Deliberately
+   quieter than the flag tints above it in the stacking order. */
 .dark .prompt-editor {
-    --flag-ok: oklch(0.765 0.177 163.223);      /* emerald-400 */
-    --flag-suspect: oklch(0.828 0.189 84.429);  /* amber-400 */
-    --flag-stale: oklch(0.704 0.191 22.216);    /* red-400 */
-    --flag-revisit: oklch(0.702 0.183 293.541); /* violet-400 */
-    --md-heading: oklch(0.746 0.16 232.661);    /* sky-400 */
-    --md-var: oklch(0.702 0.183 293.541);       /* violet-400 */
-    --md-code: oklch(0.828 0.189 84.429);       /* amber-400 */
-    --md-tag: oklch(0.777 0.152 181.912);       /* teal-400 */
-    --md-string: oklch(0.792 0.209 151.711);    /* green-400 */
+    --flag-ok: oklch(0.74 0.09 160);
+    --flag-suspect: oklch(0.79 0.1 80);
+    --flag-stale: oklch(0.7 0.11 25);
+    --flag-revisit: oklch(0.73 0.09 295);
+    --md-heading: oklch(0.76 0.08 235);
+    --md-var: oklch(0.75 0.09 295);
+    --md-code: oklch(0.79 0.09 78);
+    --md-tag: oklch(0.76 0.07 185);
+    --md-string: oklch(0.77 0.09 150);
 }
 
 .prompt-editor .cm-editor {

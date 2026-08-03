@@ -121,6 +121,10 @@ distance.
 ## Non-functional
 
 - **Surface:** web app only. No desktop app, no editor extension, no CLI.
+- **Appearance:** light and dark themes, following the OS by default, switchable
+  from the library footer and remembered locally. The dark theme is deliberately
+  dim rather than black — a narrow canvas-to-text range and muted syntax colors,
+  so the region flags stay the loudest thing on screen during a long read.
 - **Storage:** Supabase (Postgres) — prompts, versions, regions, snippets,
   snippet-usage links.
 - **Users:** single user. Auth exists only to keep data private, not to coordinate
