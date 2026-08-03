@@ -108,7 +108,11 @@ export function FindBar({
     setCount(matches.length)
     setCurrent(idx)
     setLinked(linkedMatchCount(view.state, matches))
-    setFind(view, matches, idx)
+    // Paint AND reveal: a counter reading "1 / 7" must never point at something
+    // folded away or scrolled off-screen. setFind still handles the no-match
+    // case, which only needs the previous highlights cleared.
+    if (matches.length) gotoMatch(view, matches, idx)
+    else setFind(view, matches, idx)
   }, [view, query, opts])
 
   // Re-search on query/opts change and on doc edits (docEpoch) while open.

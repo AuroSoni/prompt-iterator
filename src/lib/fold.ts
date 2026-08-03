@@ -143,7 +143,16 @@ export function promptFolding(): Extension {
 
 /** Unfold every folded range overlapping [from, to]. A region can START just
  *  before a fold (heading line visible, body collapsed), so point containment
- *  is not enough — the whole target span must end up visible. */
+ *  is not enough — the whole target span must end up visible.
+ *
+ *  **Invariant for anything that scrolls to a document position: call this
+ *  first.** Folded text is a replacing decoration with no DOM box, so a mark
+ *  over it paints onto nothing and scrollIntoView resolves to the fold
+ *  placeholder's line instead of the target. Every jump path composes it:
+ *  revealPos (outline), scrollToRegion (ribbon/comments, see prompt-editor),
+ *  unfoldRecursively (@/lib/fold-commands), and gotoMatch (@/lib/find) — that
+ *  last one was added late, after shipping without it made find navigation
+ *  silently no-op on a folded document. */
 export function unfoldAt(view: EditorView, from: number, to: number = from): void {
   const effects: StateEffect<{ from: number; to: number }>[] = []
   foldedRanges(view.state).between(0, view.state.doc.length, (f, t) => {
