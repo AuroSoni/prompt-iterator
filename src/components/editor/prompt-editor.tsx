@@ -122,7 +122,7 @@ const SCAN_DEBOUNCE_MS = 800
  *  spans exactly equal to a snippet's canonical body and mark them as linked,
  *  born-synced regions. One dispatch = one transaction = one updateDocContent
  *  (linkSig changes → recomputeUsage → usedBy climbs, which is exactly how a
- *  twice-pasted mark-created snippet surfaces in the sidebar). Idempotent via
+ *  twice-pasted library snippet surfaces in the sidebar). Idempotent via
  *  the overlap guard, so StrictMode double-mounts are safe; the scan's own
  *  effects-only dispatch never reschedules itself (scan runs on docChanged
  *  only), so there is no loop. */

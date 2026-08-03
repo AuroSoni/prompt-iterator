@@ -87,7 +87,7 @@ interface LibrarySidebarProps {
   /** Insert a snippet's text at the cursor of the active prompt (as a linked
    *  region). Reports an error if there's no editable prompt focused. */
   onInsertSnippet: (snippetId: string) => void
-  /** Pin a mark-created snippet into the library list. */
+  /** Pin a one-off snippet into the library list. */
   onPromoteSnippet: (snippetId: string) => void
   /** Folder CRUD (await-first store ops; failures land on the shared banner). */
   onCreateFolder: (

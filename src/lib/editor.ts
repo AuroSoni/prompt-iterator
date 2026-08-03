@@ -26,9 +26,10 @@ export interface Region {
   note: string
   from: number
   to: number
-  /** Unification ("all regions are snippets"): when set, this region is an
-   *  occurrence of a library snippet — its text was copied from that snippet and
-   *  it can pull/push updates. Absent = a plain local annotation (legacy). */
+  /** Absent by default — marking a span is annotation and nothing more. When
+   *  set, this region is an occurrence of a snippet (via Make reusable, insert,
+   *  or auto-match): its text was copied from that snippet and it can
+   *  pull/push updates. */
   snippetId?: string
   /** The snippet `version` this region's text was last synced to. Drives the
    *  staleness signal: syncedVersion < snippet.version ⇒ update available. */

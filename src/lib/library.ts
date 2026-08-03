@@ -1268,12 +1268,13 @@ export async function createSnippet(name: string): Promise<string> {
 }
 
 /** Create (or link to) a snippet whose canonical body IS `text` — the write path
- *  behind marking a region and inserting. Unification: marking a span promotes it
- *  to a snippet automatically. **Dedup:** if a snippet already has this exact
- *  canonical body, link to it (so usedBy climbs to ≥2 and it enters the library)
- *  instead of inserting a duplicate. Await-first (mirrors createPrompt), so the
- *  INSERT lands before any debounced region UPDATE. A mark-created snippet is
- *  `library:false` and surfaces only once referenced by 2+ regions. */
+ *  behind **Make reusable snippet** on a region. Marking a region never lands
+ *  here: annotation and reuse are separate acts. **Dedup:** if a snippet already
+ *  has this exact canonical body, link to it (so usedBy climbs to ≥2 and it
+ *  enters the library) instead of inserting a duplicate. Await-first (mirrors
+ *  createPrompt), so the INSERT lands before any debounced region UPDATE. A
+ *  promoted snippet is `library:false` and surfaces only once referenced by
+ *  2+ regions, or once pinned via promoteSnippet. */
 export async function createSnippetFromText(
   name: string,
   text: string
@@ -1329,7 +1330,7 @@ export async function createSnippetFromText(
   return { id, version: 1 }
 }
 
-/** Surface a mark-created snippet in the library list regardless of usage. */
+/** Surface a one-off snippet in the library list regardless of usage. */
 export async function promoteSnippet(id: string): Promise<void> {
   const snip = snippets.find((s) => s.id === id)
   if (!snip || snip.library) return
